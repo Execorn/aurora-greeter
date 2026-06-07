@@ -196,11 +196,17 @@ find "${THEME_DEST}" -type d -exec chmod 755 {} \;
 _info "Setting files → 644"
 find "${THEME_DEST}" -type f -exec chmod 644 {} \;
 
+# Make the companion CLI tool executable
+if [[ -f "${THEME_DEST}/sddm-aurora-ctl" ]]; then
+    chmod 755 "${THEME_DEST}/sddm-aurora-ctl"
+    _ok "Companion CLI tool executable set to 755"
+fi
+
 # Root owns everything in the theme directory.
 chown -R root:root "${THEME_DEST}"
 
 _ok "Ownership: root:root"
-_ok "Directories: 755  |  Files: 644"
+_ok "Directories: 755  |  Files: 644 (CLI tool: 755)"
 _section_done
 
 # ==============================================================================

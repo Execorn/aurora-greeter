@@ -919,7 +919,11 @@ def _wallpaper_set(args: argparse.Namespace) -> None:
     elif kind == "playlist":
         src_path = Path(source).expanduser().resolve()
         if not src_path.exists():
-            _die(f"Playlist file not found: {src_path}")
+            alt_path = (THEME_ROOT / source).resolve()
+            if alt_path.exists():
+                src_path = alt_path
+            else:
+                _die(f"Playlist file not found: {src_path}")
 
         _ensure_dir(PLAYLISTS_DIR)
         dest = PLAYLISTS_DIR / src_path.name
@@ -938,7 +942,11 @@ def _wallpaper_set(args: argparse.Namespace) -> None:
     elif kind == "video":
         src_path = Path(source).expanduser().resolve()
         if not src_path.exists():
-            _die(f"Video file not found: {src_path}")
+            alt_path = (THEME_ROOT / source).resolve()
+            if alt_path.exists():
+                src_path = alt_path
+            else:
+                _die(f"Video file not found: {src_path}")
 
         bg_dir = THEME_ROOT / "backgrounds"
         _ensure_dir(bg_dir)
@@ -954,7 +962,11 @@ def _wallpaper_set(args: argparse.Namespace) -> None:
     elif kind == "image":
         src_path = Path(source).expanduser().resolve()
         if not src_path.exists():
-            _die(f"Image file not found: {src_path}")
+            alt_path = (THEME_ROOT / source).resolve()
+            if alt_path.exists():
+                src_path = alt_path
+            else:
+                _die(f"Image file not found: {src_path}")
 
         bg_dir = THEME_ROOT / "backgrounds"
         _ensure_dir(bg_dir)
