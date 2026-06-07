@@ -70,6 +70,9 @@ Item {
         //   low  — force 2K, reduced animation durations (less GPU compositing)
         property string performanceMode:        "auto"
 
+        // Indicator if the configuration file was loaded and parsed successfully from disk
+        property bool _loaded: false
+
         // ── load(): read JSON from disk, overwrite properties ─────────
         //  Called once from Component.onCompleted.
         //  Requires QML_XHR_ALLOW_FILE_READ=1 in the sddm.service environment
@@ -99,6 +102,7 @@ Item {
                 if (typeof data.backgroundColor        === "string") backgroundColor        = data.backgroundColor
                 if (typeof data.activeMediaSource      === "string") activeMediaSource      = data.activeMediaSource
                 if (typeof data.performanceMode        === "string") performanceMode        = data.performanceMode
+                _loaded = true
             } catch(e) {
                 console.warn("[AuroraGreeter] Settings JSON parse error:", e)
             }
@@ -1727,7 +1731,7 @@ Item {
 
         var videoPath, imagePath
 
-        if (savedPlaylist !== defaultSentinel && savedPlaylist !== "") {
+        if (persist._loaded && savedPlaylist !== "") {
             // User has persisted an explicit choice — honour it.
             videoPath = savedPlaylist
             imagePath = persist.activeMediaSource !== ""
@@ -1749,6 +1753,15 @@ Item {
             imagePath = isDay ? config.background_img_day  : config.background_img_night
             console.log("[Aurora] Init — first boot / default. isDay:", isDay,
                         "| video:", videoPath, "| image:", imagePath)
+
+            // Sync default back to persist so UI states (and reload pipelines) align
+            persist.activePlaylist = videoPath
+            persist.activeMediaSource = imagePath
+
+            var cfgMM = (typeof config.multiMonitorMode !== "undefined" && config.multiMonitorMode !== "")
+                        ? config.multiMonitorMode
+                        : "mirror"
+            persist.activeMultiMonitorMode = cfgMM
         }
 
         _initPlayback(videoPath, imagePath)
