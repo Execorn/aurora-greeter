@@ -13,6 +13,8 @@
 
 **A cinematic, hardware-adaptive SDDM login theme powered by cinematic video, intelligent performance scaling, and a fully-featured live configuration drawer.**
 
+<img src="resources/preview.gif" width="750" alt="Aurora Greeter Preview" style="border-radius: 12px; border: 1px solid rgba(255,255,255,0.15); margin: 20px 0;"/>
+
 [![Qt6](https://img.shields.io/badge/Qt-6-41cd52?logo=qt&logoColor=white)](https://qt.io)
 [![SDDM](https://img.shields.io/badge/SDDM-compatible-4c8cf5?logo=linux)](https://github.com/sddm/sddm)
 [![License: MIT / CC--BY--SA--4.0](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -74,22 +76,44 @@ The drawer gives you:
 
 ## 🚀 Installation
 
+### 📦 Option A — Arch Linux (AUR)
+
+For Arch Linux users, the theme and its companion CLI command are packaged in the Arch User Repository (AUR) under the name `sddm-theme-aurora-greeter-git`.
+
+Install it using your preferred AUR helper (e.g. `yay` or `paru`):
+
+```bash
+yay -S sddm-theme-aurora-greeter-git
+```
+
+*This automatically resolves dependencies, deploys the theme files, symlinks the control tool directly into `/usr/bin/sddm-aurora-ctl` so it can be run from anywhere, and sets up correct ownership and execution permissions.*
+
+### 🛠️ Option B — Manual Installation (Other Distros)
+
 ```bash
 # 1. Clone the repo
 git clone https://github.com/execorn/aurora-greeter /path/to/aurora-greeter
 cd /path/to/aurora-greeter
 
-# 2. Install theme files
+# 2. Run the installer script
 sudo bash install.sh
 
-# 3. (Optional but recommended) Enable hardware video decode
-sudo ./sddm-aurora-ctl hw-accel install
+# 3. (Optional but highly recommended) Enable hardware video decode
+sudo /usr/share/sddm/themes/aurora-greeter/sddm-aurora-ctl hw-accel install
+```
 
-# 4. Set SDDM to use this theme
+### ⚙️ Post-Installation Activation
+
+To set SDDM to use the Aurora Greeter:
+
+```bash
 echo '[Theme]
 Current=aurora-greeter' | sudo tee /etc/sddm.conf.d/aurora.conf
+```
 
-# 5. Restart SDDM (active session will end — save your work!)
+To test or apply your settings immediately, restart the SDDM service (warning: this will end your current active user session!):
+
+```bash
 sudo systemctl restart sddm
 ```
 
@@ -170,12 +194,13 @@ To maintain professional-grade stability and reliability on production display m
 
 The `sddm-aurora-ctl` script is your terminal interface to every setting. It operates on `/var/lib/sddm/.config/AuroraGreeter/settings.json` and theme configuration files.
 
-```bash
-# Make it executable (done once)
-chmod +x sddm-aurora-ctl
+> [!NOTE]
+> - **Arch Linux (AUR) Users**: The script is globally symlinked. You can execute `sddm-aurora-ctl` directly from any directory (e.g., `sudo sddm-aurora-ctl --help`).
+> - **Manual Users**: Execute the script using its absolute path `sudo /usr/share/sddm/themes/aurora-greeter/sddm-aurora-ctl` or from within the cloned repository directory via `./sddm-aurora-ctl`.
 
+```bash
 # Show all subcommands
-./sddm-aurora-ctl --help
+sddm-aurora-ctl --help
 ```
 
 ### Catalogue Management (`catalogue` / `cat`)
@@ -183,16 +208,16 @@ Manages `playlists/index.json` which the ConfigDrawer reads to populate its pick
 
 ```bash
 # List all registered catalogue entries
-sudo ./sddm-aurora-ctl catalogue list
+sudo sddm-aurora-ctl catalogue list
 
 # Add a video playlist from a directory (scans recursively, generates a .m3u, registers it)
-sudo ./sddm-aurora-ctl catalogue add-video "My Vacation Videos" /path/to/videos/folder
+sudo sddm-aurora-ctl catalogue add-video "My Vacation Videos" /path/to/videos/folder
 
 # Register a single image in index.json (copies it to theme's backgrounds/ directory)
-sudo ./sddm-aurora-ctl catalogue add-image "Sunset Skyline" /path/to/image.png
+sudo sddm-aurora-ctl catalogue add-image "Sunset Skyline" /path/to/image.png
 
 # Remove an entry from the catalogue (does not delete underlying files)
-sudo ./sddm-aurora-ctl catalogue remove "Sunset Skyline" --type image
+sudo sddm-aurora-ctl catalogue remove "Sunset Skyline" --type image
 ```
 
 ### Playlist Creation (`playlist`)
@@ -200,10 +225,10 @@ Manage custom playlists directly.
 
 ```bash
 # Scan a directory recursively and create an .m3u playlist in theme's playlists/ folder
-sudo ./sddm-aurora-ctl playlist create summer_playlist /path/to/media
+sudo sddm-aurora-ctl playlist create summer_playlist /path/to/media
 
 # Change playback order of a playlist (shuffled or sequential)
-sudo ./sddm-aurora-ctl playlist order summer_playlist shuffled
+sudo sddm-aurora-ctl playlist order summer_playlist shuffled
 ```
 
 ### Active Wallpaper / Backdrop Source (`wallpaper`)
@@ -211,9 +236,9 @@ Set the active background source directly.
 
 ```bash
 # Set a local video file, image file, .m3u playlist, or streaming URL
-sudo ./sddm-aurora-ctl wallpaper set /path/to/my_background.jpg
-sudo ./sddm-aurora-ctl wallpaper set playlists/summer_playlist.m3u
-sudo ./sddm-aurora-ctl wallpaper set https://example.com/stream.mp4
+sudo sddm-aurora-ctl wallpaper set /path/to/my_background.jpg
+sudo sddm-aurora-ctl wallpaper set playlists/summer_playlist.m3u
+sudo sddm-aurora-ctl wallpaper set https://example.com/stream.mp4
 ```
 
 ### Day/Night Scheduler (`scheduler`)
@@ -221,11 +246,11 @@ Configure automatic schedule-based background swapping.
 
 ```bash
 # Set day mode start and end hours (24h format)
-sudo ./sddm-aurora-ctl scheduler set-time --day-start 8 --day-end 21
+sudo sddm-aurora-ctl scheduler set-time --day-start 8 --day-end 21
 
 # Enable/disable scheduling mode (switch between time-based and manual settings)
-sudo ./sddm-aurora-ctl config set-theme --schedule on
-sudo ./sddm-aurora-ctl config set-theme --schedule off
+sudo sddm-aurora-ctl config set-theme --schedule on
+sudo sddm-aurora-ctl config set-theme --schedule off
 ```
 
 > [!TIP]
@@ -236,31 +261,31 @@ Modify appearance properties.
 
 ```bash
 # Set performance mode (low | auto | high)
-sudo ./sddm-aurora-ctl config set-theme --performance-mode low
+sudo sddm-aurora-ctl config set-theme --performance-mode low
 
 # Set backdrop type (video | image | slideshow | color)
-sudo ./sddm-aurora-ctl config set-theme --bg-type slideshow
+sudo sddm-aurora-ctl config set-theme --bg-type slideshow
 
 # Set solid background color (for color mode)
-sudo ./sddm-aurora-ctl config set-theme --bg-type color --bg-color '#1e1e2e'
+sudo sddm-aurora-ctl config set-theme --bg-type color --bg-color '#1e1e2e'
 
 # Set slideshow transition interval in seconds (5–60)
-sudo ./sddm-aurora-ctl config set-theme --slideshow-interval 20
+sudo sddm-aurora-ctl config set-theme --slideshow-interval 20
 
 # Set accent color (highlight color for focus ring, pills)
-sudo ./sddm-aurora-ctl config set-theme --accent '#cba6f7'
+sudo sddm-aurora-ctl config set-theme --accent '#cba6f7'
 
 # Set login card background opacity (0.0–1.0)
-sudo ./sddm-aurora-ctl config set-theme --opacity 0.75
+sudo sddm-aurora-ctl config set-theme --opacity 0.75
 
 # Set login card border radius in pixels
-sudo ./sddm-aurora-ctl config set-theme --radius 22
+sudo sddm-aurora-ctl config set-theme --radius 22
 
 # Set multi-monitor mode (mirror | primary-only | blank-auxiliary)
-sudo ./sddm-aurora-ctl config set-theme --monitor-mode primary-only
+sudo sddm-aurora-ctl config set-theme --monitor-mode primary-only
 
 # Toggle day/night time-based scheduling (on | off)
-sudo ./sddm-aurora-ctl config set-theme --schedule off
+sudo sddm-aurora-ctl config set-theme --schedule off
 ```
 
 ### Hardware Acceleration (`hw-accel`)
@@ -268,16 +293,16 @@ Manage the systemd GStreamer hardware acceleration drop-in.
 
 ```bash
 # Install drop-in with GPU auto-detection
-sudo ./sddm-aurora-ctl hw-accel install
+sudo sddm-aurora-ctl hw-accel install
 
 # Force a specific driver type (nvidia | amd | intel)
-sudo ./sddm-aurora-ctl hw-accel install --force-gpu amd
+sudo sddm-aurora-ctl hw-accel install --force-gpu amd
 
 # View detection details and drop-in status
-./sddm-aurora-ctl hw-accel status
+sddm-aurora-ctl hw-accel status
 
 # Remove the systemd drop-in
-sudo ./sddm-aurora-ctl hw-accel uninstall
+sudo sddm-aurora-ctl hw-accel uninstall
 ```
 
 ---
@@ -293,20 +318,20 @@ If you have a directory of wallpapers (e.g., `/path/to/wallpapers`) and want to 
 #### Option A: Set Active Wallpaper via CLI
 ```bash
 # 1. Create a playlist of the images
-sudo ./sddm-aurora-ctl playlist create my_wallpapers /path/to/wallpapers
+sudo sddm-aurora-ctl playlist create my_wallpapers /path/to/wallpapers
 
 # 2. Set the background type to slideshow
-sudo ./sddm-aurora-ctl config set-theme --bg-type slideshow
+sudo sddm-aurora-ctl config set-theme --bg-type slideshow
 
 # 3. Set the active wallpaper source to the new playlist
-sudo ./sddm-aurora-ctl wallpaper set playlists/my_wallpapers.m3u
+sudo sddm-aurora-ctl wallpaper set playlists/my_wallpapers.m3u
 ```
 
 #### Option B: Register it in the Config Drawer GUI
 To make the slideshow select-able inside the GUI drawer:
 1. Generate the playlist file:
    ```bash
-   sudo ./sddm-aurora-ctl playlist create my_wallpapers /path/to/wallpapers
+   sudo sddm-aurora-ctl playlist create my_wallpapers /path/to/wallpapers
    ```
 2. Open the catalogue index file:
    ```bash
@@ -398,7 +423,7 @@ background_img_night=backgrounds/background.jpg
 
 Switch profile from the Config Drawer (PERFORMANCE pill) or via CLI:
 ```bash
-sudo ./sddm-aurora-ctl config set-theme --performance-mode low
+sudo sddm-aurora-ctl config set-theme --performance-mode low
 ```
 
 ---
@@ -407,13 +432,13 @@ sudo ./sddm-aurora-ctl config set-theme --performance-mode low
 
 ```bash
 # All screens show background + login UI
-sudo ./sddm-aurora-ctl config set-theme --monitor-mode mirror
+sudo sddm-aurora-ctl config set-theme --monitor-mode mirror
 
 # Primary screen gets video + UI; others get video only
-sudo ./sddm-aurora-ctl config set-theme --monitor-mode primary-only
+sudo sddm-aurora-ctl config set-theme --monitor-mode primary-only
 
 # Primary gets everything; auxiliary screens are solid black (saves GPU on weak setups)
-sudo ./sddm-aurora-ctl config set-theme --monitor-mode blank-auxiliary
+sudo sddm-aurora-ctl config set-theme --monitor-mode blank-auxiliary
 ```
 
 Settings changes made in the Config Drawer propagate to all monitors within ~400 ms via the polling sync timer.
@@ -489,6 +514,8 @@ aurora-greeter/
 → Check `theme.conf.user` → `relativePositionX` and `relativePositionY`. Set both to `0.5` for dead-center, or use the `theme.conf` defaults.
 
 ---
+
+
 
 ## 📜 License
 
