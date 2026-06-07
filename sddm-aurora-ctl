@@ -22,7 +22,7 @@
 #    wallpaper set    <file|url>              — Switch active backdrop
 #    scheduler set-time --day-start H --day-end H  — Day/night window
 #    config    set-theme [--accent COLOR] [--opacity F] [--radius N]
-#                        [--monitor-mode MODE]  — Aesthetic options
+#                        [--monitor-mode MODE] [--schedule on|off]  — Aesthetic options
 # =============================================================================
 
 import argparse
@@ -283,6 +283,8 @@ _SETTINGS_DEFAULTS: dict = {
     "backgroundColor":       "#1e1e2e",    # solid backdrop color
     # Performance Profile    [v4 — mirrors Main.qml persist block]
     "performanceMode":       "auto",        # auto | high | low
+    # Day/Night Scheduling   [v5 — mirrors Main.qml persist block]
+    "useDayNightSchedule":    True,
 }
 
 
@@ -299,6 +301,14 @@ def _load_settings() -> dict:
             raw = json.loads(SETTINGS_JSON.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
                 data.update(raw)
+                # Migration fallback: if useDayNightSchedule is not in settings.json
+                # but a custom activePlaylist exists, default to False.
+                if "useDayNightSchedule" not in raw:
+                    has_custom = (
+                        "activePlaylist" in raw and
+                        raw["activePlaylist"] != "playlists/Background.mp4"
+                    )
+                    data["useDayNightSchedule"] = not has_custom
         except (json.JSONDecodeError, OSError) as exc:
             _warn(f"Could not parse {SETTINGS_JSON}: {exc}  (using defaults)")
     return data
@@ -1091,11 +1101,21 @@ def _config_set_theme(args: argparse.Namespace) -> None:
         updates["performanceMode"] = pm
         _info(f"performanceMode       → {pm}")
 
+    # [NEW v5] day/night schedule toggle
+    if args.schedule is not None:
+        val = args.schedule.strip().lower()
+        if val == "on":
+            updates["useDayNightSchedule"] = True
+            _info("useDayNightSchedule   → True")
+        elif val == "off":
+            updates["useDayNightSchedule"] = False
+            _info("useDayNightSchedule   → False")
+
     if not updates and args.radius is None:
         _die(
             "No options specified.  At least one of --accent, --opacity, "
             "--radius, --monitor-mode, --bg-type, --bg-color, "
-            "--slideshow-interval, or --performance-mode is required."
+            "--slideshow-interval, --performance-mode, or --schedule is required."
         )
 
     _ensure_elevated()
@@ -1535,6 +1555,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "  high  — always use highest available quality (may be 4K)\n"
             "  low   — force 2K URLs + fast animations (best for iGPU)"
         ),
+    )
+    # [NEW v5] Day/night schedule toggle
+    cfg_theme.add_argument(
+        "--schedule",
+        metavar="on|off",
+        default=None,
+        choices=["on", "off"],
+        help="toggle day/night scheduling: 'on' (time-based) | 'off' (manual)",
     )
     cfg_theme.set_defaults(func=_config_set_theme)
 

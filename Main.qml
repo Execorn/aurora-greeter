@@ -70,6 +70,9 @@ Item {
         //   low  — force 2K, reduced animation durations (less GPU compositing)
         property string performanceMode:        "auto"
 
+        // [v5] Day/night scheduling toggle: true = time-based, false = manual/hardcoded
+        property bool   useDayNightSchedule:    true
+
         // Indicator if the configuration file was loaded and parsed successfully from disk
         property bool _loaded: false
 
@@ -102,6 +105,14 @@ Item {
                 if (typeof data.backgroundColor        === "string") backgroundColor        = data.backgroundColor
                 if (typeof data.activeMediaSource      === "string") activeMediaSource      = data.activeMediaSource
                 if (typeof data.performanceMode        === "string") performanceMode        = data.performanceMode
+
+                var hasCustomPlaylist = (typeof data.activePlaylist === "string" && data.activePlaylist !== "playlists/Background.mp4")
+                if (typeof data.useDayNightSchedule   === "boolean") {
+                    useDayNightSchedule = data.useDayNightSchedule
+                } else {
+                    useDayNightSchedule = !hasCustomPlaylist
+                }
+
                 _loaded = true
             } catch(e) {
                 console.warn("[AuroraGreeter] Settings JSON parse error:", e)
@@ -121,7 +132,8 @@ Item {
                 slideshowInterval:      slideshowInterval,
                 backgroundColor:        backgroundColor,
                 activeMediaSource:      activeMediaSource,
-                performanceMode:        performanceMode
+                performanceMode:        performanceMode,
+                useDayNightSchedule:    useDayNightSchedule
             }
             var json = JSON.stringify(data, null, 2)
             var xhr  = new XMLHttpRequest()
@@ -158,6 +170,9 @@ Item {
 
     // [v4] Performance profile bridging
     property string performanceMode:        persist.performanceMode
+
+    // [v5] Day/night scheduling toggle bridging
+    property bool   useDayNightSchedule:    persist.useDayNightSchedule
 
     // ─────────────────────────────────────────────────────────────────────
     //  PERFORMANCE PROFILE — COMPUTED ANIMATION DURATIONS              [v4]
@@ -1113,6 +1128,7 @@ Item {
         settings:         persist
         reloadPlaylist:   root._reloadPlaylist
         reloadBackdrop:   root._reloadBackdrop
+        updateBackdropFromSettings: root._updateBackdropFromSettings
         loginFocusTarget: uiLoader.item
     }
 
@@ -1669,14 +1685,17 @@ Item {
                               data.performanceMode     !== persist.performanceMode)
             var mmChanged  = (typeof data.activeMultiMonitorMode === "string" &&
                               data.activeMultiMonitorMode !== persist.activeMultiMonitorMode)
+            var schedChanged = (typeof data.useDayNightSchedule === "boolean" &&
+                                data.useDayNightSchedule !== persist.useDayNightSchedule)
 
-            if (!bgChanged && !plChanged && !pmChanged && !mmChanged) return
+            if (!bgChanged && !plChanged && !pmChanged && !mmChanged && !schedChanged) return
 
             // Sync all changed fields silently
             if (typeof data.activeBackgroundType   === "string") persist.activeBackgroundType   = data.activeBackgroundType
             if (typeof data.activePlaylist         === "string") persist.activePlaylist         = data.activePlaylist
             if (typeof data.performanceMode        === "string") persist.performanceMode        = data.performanceMode
             if (typeof data.activeMultiMonitorMode === "string") persist.activeMultiMonitorMode = data.activeMultiMonitorMode
+            if (typeof data.useDayNightSchedule    === "boolean") persist.useDayNightSchedule   = data.useDayNightSchedule
             // Also sync visual-only settings so they stay consistent
             if (typeof data.accentColor            === "string") persist.accentColor            = data.accentColor
             if (typeof data.loginCardOpacity       === "number") persist.loginCardOpacity       = data.loginCardOpacity
@@ -1693,14 +1712,56 @@ Item {
             // Only restart the media pipeline when media-related settings changed.
             // Monitor-mode changes propagate automatically via QML bindings
             // (showBackground, showUI) without needing a pipeline reload.
-            if (bgChanged || plChanged || pmChanged) {
-                var syncSrc = (persist.activeBackgroundType === "video")
+            if (bgChanged || plChanged || pmChanged || schedChanged) {
+                var syncSrc
+                if (persist.useDayNightSchedule) {
+                    var scheduled = _resolveScheduledMedia()
+                    syncSrc = (persist.activeBackgroundType === "video") ? scheduled.video : scheduled.image
+                } else {
+                    syncSrc = (persist.activeBackgroundType === "video")
                               ? persist.activePlaylist
                               : persist.activeMediaSource
+                }
                 _reloadBackdrop(persist.activeBackgroundType,
                                 Qt.resolvedUrl(syncSrc))
             }
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  DAY/NIGHT SCHEDULER HELPERS
+    // ─────────────────────────────────────────────────────────────────────
+
+    // Resolves time-based background paths using system clock and theme.conf settings
+    function _resolveScheduledMedia() {
+        var hour     = parseInt(new Date().toLocaleTimeString(Qt.locale(), 'h'))
+        var dayStart = parseInt(config.day_time_start)
+        var dayEnd   = parseInt(config.day_time_end)
+        var isDay    = (!isNaN(dayStart) && !isNaN(dayEnd))
+                       ? (hour >= dayStart && hour <= dayEnd)
+                       : true
+
+        var videoPath = isDay ? config.background_vid_day  : config.background_vid_night
+        var imagePath = isDay ? config.background_img_day  : config.background_img_night
+        return { video: videoPath, image: imagePath }
+    }
+
+    // Refreshes the active backdrop mode with the correct media source from settings
+    function _updateBackdropFromSettings() {
+        var videoPath, imagePath
+        if (persist.useDayNightSchedule) {
+            var scheduled = _resolveScheduledMedia()
+            videoPath = scheduled.video
+            imagePath = scheduled.image
+            console.log("[Aurora] Backdrop Update — Schedule mode ON. video:", videoPath, "| image:", imagePath)
+        } else {
+            videoPath = persist.activePlaylist
+            imagePath = persist.activeMediaSource !== "" ? persist.activeMediaSource : "backgrounds/background.jpg"
+            console.log("[Aurora] Backdrop Update — Schedule mode OFF (Manual). video:", videoPath, "| image:", imagePath)
+        }
+
+        var syncSrc = (persist.activeBackgroundType === "video") ? videoPath : imagePath
+        _reloadBackdrop(persist.activeBackgroundType, syncSrc)
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -1714,26 +1775,17 @@ Item {
         persist.load()
 
         // ── Source selection ───────────────────────────────────────────
-        //
-        //  Decision tree:
-        //    1. If persist.activePlaylist is NOT the default sentinel
-        //       ("playlists/day.m3u"), the user has saved an explicit
-        //       choice — use it unconditionally.
-        //    2. Otherwise fall back to the time-of-day picker (original
-        //       behaviour) so first-boot auto-selects day/night correctly.
-
-        // Default sentinel = the out-of-box value set in persist block above.
-        // If persist.load() found a saved file, activePlaylist is already
-        // overwritten; we only fall back to theme.conf when it still equals
-        // the sentinel (i.e. the user has never saved a preference).
-        var defaultSentinel = "playlists/Background.mp4"
-        var savedPlaylist   = persist.activePlaylist
-
         var videoPath, imagePath
 
-        if (persist._loaded && savedPlaylist !== "") {
+        if (persist.useDayNightSchedule) {
+            // Time-of-day picker active
+            var scheduled = _resolveScheduledMedia()
+            videoPath = scheduled.video
+            imagePath = scheduled.image
+            console.log("[Aurora] Init — scheduling is ON. video:", videoPath, "| image:", imagePath)
+        } else if (persist._loaded && persist.activePlaylist !== "") {
             // User has persisted an explicit choice — honour it.
-            videoPath = savedPlaylist
+            videoPath = persist.activePlaylist
             imagePath = persist.activeMediaSource !== ""
                         ? persist.activeMediaSource
                         : (typeof config.background_img_day !== "undefined"
@@ -1742,17 +1794,10 @@ Item {
             console.log("[Aurora] Init — using saved playlist:", videoPath)
         } else {
             // First boot or user reset — use theme.conf defaults.
-            var hour     = parseInt(new Date().toLocaleTimeString(Qt.locale(), 'h'))
-            var dayStart = parseInt(config.day_time_start)
-            var dayEnd   = parseInt(config.day_time_end)
-            var isDay    = (!isNaN(dayStart) && !isNaN(dayEnd))
-                           ? (hour >= dayStart && hour <= dayEnd)
-                           : true
-
-            videoPath = isDay ? config.background_vid_day  : config.background_vid_night
-            imagePath = isDay ? config.background_img_day  : config.background_img_night
-            console.log("[Aurora] Init — first boot / default. isDay:", isDay,
-                        "| video:", videoPath, "| image:", imagePath)
+            var scheduled = _resolveScheduledMedia()
+            videoPath = scheduled.video
+            imagePath = scheduled.image
+            console.log("[Aurora] Init — first boot / default. video:", videoPath, "| image:", imagePath)
 
             // Sync default back to persist so UI states (and reload pipelines) align
             persist.activePlaylist = videoPath

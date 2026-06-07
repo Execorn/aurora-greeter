@@ -60,6 +60,9 @@ Item {
     // Used for all mode switches and backdrop source changes.
     property var      reloadBackdrop:   null
 
+    // [v5] Callback to refresh backdrop after changing schedule settings.
+    property var      updateBackdropFromSettings: null
+
     // The item that receives focus when the drawer closes.
     property Item     loginFocusTarget: null
 
@@ -678,14 +681,100 @@ Item {
                                             // Pass raw path strings (not Qt.resolvedUrl) so that
                                             // Main.qml resolves them against the theme root, not
                                             // the components/ subdirectory.
-                                            if (typeof root.reloadBackdrop === "function") {
-                                                var srcPath = (newType === "video")
-                                                    ? root.settings.activePlaylist
-                                                    : root.settings.activeMediaSource
-                                                root.reloadBackdrop(newType, srcPath)
+                                            if (root.settings.useDayNightSchedule) {
+                                                if (typeof root.updateBackdropFromSettings === "function") {
+                                                    root.updateBackdropFromSettings()
+                                                }
+                                            } else {
+                                                if (typeof root.reloadBackdrop === "function") {
+                                                    var srcPath = (newType === "video")
+                                                        ? root.settings.activePlaylist
+                                                        : root.settings.activeMediaSource
+                                                    root.reloadBackdrop(newType, srcPath)
+                                                }
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                SectionDivider {}
+
+                // ─────────────────────────────────────────────────
+                //  SECTION: DAY/NIGHT SCHEDULING
+                // ─────────────────────────────────────────────────
+                SectionLabel { label: "DAY/NIGHT SCHEDULING" }
+
+                Item {
+                    width:  parent.width
+                    height: 58
+
+                    Rectangle {
+                        id: scheduleTrack
+                        anchors {
+                            left:           parent.left
+                            right:          parent.right
+                            leftMargin:     16
+                            rightMargin:    16
+                            verticalCenter: parent.verticalCenter
+                        }
+                        height:       36
+                        radius:       18
+                        color:        Qt.rgba(1, 1, 1, 0.06)
+                        border.color: Qt.rgba(1, 1, 1, 0.13)
+                        border.width: 1
+
+                        readonly property bool _isScheduled:
+                            root.settings !== null && root.settings.useDayNightSchedule
+
+                        Rectangle {
+                            id: scheduleThumb
+                            width:  scheduleTrack.width / 2 - 4
+                            height: scheduleTrack.height - 6
+                            y:      3
+                            x:      scheduleTrack._isScheduled ? 3 : scheduleTrack.width / 2 + 1
+                            radius: height / 2
+                            color:  Qt.rgba(root._accent.r, root._accent.g, root._accent.b, 0.82)
+
+                            Behavior on x     { NumberAnimation { duration: 220; easing.type: Easing.InOutCubic } }
+                            Behavior on color { ColorAnimation  { duration: 400 } }
+                        }
+
+                        Text {
+                            width:               parent.width / 2
+                            height:              parent.height
+                            text:                "Scheduled"
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment:   Text.AlignVCenter
+                            color: scheduleTrack._isScheduled ? "white" : Qt.rgba(1, 1, 1, 0.40)
+                            font { pixelSize: 13; bold: scheduleTrack._isScheduled; family: "sans-serif" }
+                            Behavior on color { ColorAnimation { duration: 200 } }
+                        }
+
+                        Text {
+                            x:                   parent.width / 2
+                            width:               parent.width / 2
+                            height:              parent.height
+                            text:                "Manual"
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment:   Text.AlignVCenter
+                            color: !scheduleTrack._isScheduled ? "white" : Qt.rgba(1, 1, 1, 0.40)
+                            font { pixelSize: 13; bold: !scheduleTrack._isScheduled; family: "sans-serif" }
+                            Behavior on color { ColorAnimation { duration: 200 } }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape:  Qt.PointingHandCursor
+                            onClicked: {
+                                if (root.settings === null) return
+                                root.settings.useDayNightSchedule = !scheduleTrack._isScheduled
+                                root.settings.sync()
+                                if (typeof root.updateBackdropFromSettings === "function") {
+                                    root.updateBackdropFromSettings()
                                 }
                             }
                         }
@@ -852,7 +941,7 @@ Item {
                         //   video mode      → compare against activePlaylist
                         //   image/slideshow → compare against activeMediaSource
                         readonly property bool _active: {
-                            if (root.settings === null) return false
+                            if (root.settings === null || root.settings.useDayNightSchedule) return false
                             if (root._backdropType === "video")
                                 return root.settings.activePlaylist    === model.path
                             return root.settings.activeMediaSource === model.path
@@ -938,9 +1027,7 @@ Item {
                                 var type = root._backdropType
 
                                 // Write to the correct settings key based on mode.
-                                // video tracks via activePlaylist.
-                                // image AND slideshow both track via activeMediaSource
-                                // (slideshow cycles through images, not videos).
+                                root.settings.useDayNightSchedule = false
                                 if (type === "video") {
                                     root.settings.activePlaylist = model.path
                                 } else {
