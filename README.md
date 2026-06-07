@@ -222,7 +222,14 @@ Configure automatic schedule-based background swapping.
 ```bash
 # Set day mode start and end hours (24h format)
 sudo ./sddm-aurora-ctl scheduler set-time --day-start 8 --day-end 21
+
+# Enable/disable scheduling mode (switch between time-based and manual settings)
+sudo ./sddm-aurora-ctl config set-theme --schedule on
+sudo ./sddm-aurora-ctl config set-theme --schedule off
 ```
+
+> [!TIP]
+> In the Config Drawer GUI, you can toggle between **Scheduled** and **Manual** modes under **DAY/NIGHT SCHEDULING**. Tapping any specific playlist or wallpaper from the catalogue automatically switches the mode to **Manual** so your custom choice is played immediately.
 
 ### Theme & Aesthetics Configuration (`config`)
 Modify appearance properties.
@@ -251,6 +258,9 @@ sudo ./sddm-aurora-ctl config set-theme --radius 22
 
 # Set multi-monitor mode (mirror | primary-only | blank-auxiliary)
 sudo ./sddm-aurora-ctl config set-theme --monitor-mode primary-only
+
+# Toggle day/night time-based scheduling (on | off)
+sudo ./sddm-aurora-ctl config set-theme --schedule off
 ```
 
 ### Hardware Acceleration (`hw-accel`)
