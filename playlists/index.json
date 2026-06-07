@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "video": [
+    {
+      "label": "All Videos",
+      "path": "playlists/Background.mp4",
+      "default": true
+    }
+  ],
+  "image": [
+    {
+      "label": "Default Image",
+      "path": "backgrounds/background.jpg",
+      "default": true
+    }
+  ]
+}

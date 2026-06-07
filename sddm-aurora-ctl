@@ -1,0 +1,1638 @@
+#!/usr/bin/env python3
+# =============================================================================
+#  Theme   : aurora-greeter
+#  Author  : Biryukov Nikita (@execorn)
+#  License : CC-BY-SA-4.0 / MIT
+# =============================================================================
+#  aurora-ctl — Command-Line Companion for Aurora Greeter
+#  ─────────────────────────────────────────────────────────────────────────────
+#  Architecture: Arch Linux | SDDM + Qt6 + Wayland | Python 3.10+
+#
+#  Dual-mode operation:
+#    • Development mode  — script lives inside ~/your/path/to/aurora-greeter/
+#      All writes target the local directory; sudo is never invoked.
+#    • System mode       — script installed to /usr/bin/sddm-aurora-ctl
+#      Writes target /usr/share/sddm/themes/aurora-greeter/ and
+#      /var/lib/sddm/.config/AuroraGreeter/settings.json.
+#      Write operations that need elevated privileges re-exec via sudo.
+#
+#  Subcommands:
+#    playlist  create <name> <dir>            — Scan & generate .m3u playlist
+#    playlist  order  <name> [shuffled|sequential]  — Set playback order hint
+#    wallpaper set    <file|url>              — Switch active backdrop
+#    scheduler set-time --day-start H --day-end H  — Day/night window
+#    config    set-theme [--accent COLOR] [--opacity F] [--radius N]
+#                        [--monitor-mode MODE]  — Aesthetic options
+# =============================================================================
+
+import argparse
+import configparser
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ANSI colour palette  (always available; we never rely on curses/terminfo)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RED = "\033[0;31m"
+_GREEN = "\033[0;32m"
+_YELLOW = "\033[0;33m"
+_CYAN = "\033[0;36m"
+_MAGENTA = "\033[0;35m"
+_BLUE = "\033[0;34m"
+_WHITE = "\033[0;37m"
+
+# Convenience composites
+_BOLD_CYAN = _BOLD + _CYAN
+_BOLD_GREEN = _BOLD + _GREEN
+_BOLD_RED = _BOLD + _RED
+_BOLD_YELLOW = _BOLD + _YELLOW
+_BOLD_MAGENTA = _BOLD + _MAGENTA
+
+
+def _banner() -> None:
+    """Print the branded header banner."""
+    print()
+    print(f"{_BOLD_CYAN}╔══════════════════════════════════════════════════════════════╗{_RESET}")
+    print(f"{_BOLD_CYAN}║       aurora-ctl  —  Aurora Greeter Manager                  ║{_RESET}")
+    print(f"{_BOLD_CYAN}║       Playlists · Wallpapers · Scheduler · Config           ║{_RESET}")
+    print(f"{_BOLD_CYAN}╚══════════════════════════════════════════════════════════════╝{_RESET}")
+    print()
+
+
+def _ok(msg: str) -> None:
+    print(f"    {_GREEN}✔{_RESET}  {msg}")
+
+
+def _info(msg: str) -> None:
+    print(f"    {_DIM}ℹ{_RESET}  {msg}")
+
+
+def _warn(msg: str) -> None:
+    print(f"    {_YELLOW}⚠{_RESET}  {_YELLOW}{msg}{_RESET}")
+
+
+def _err(msg: str) -> None:
+    print(f"\n    {_BOLD_RED}✘  ERROR:{_RESET} {msg}\n", file=sys.stderr)
+
+
+def _die(msg: str, code: int = 1) -> None:
+    """Print an error message and exit with the given code."""
+    _err(msg)
+    sys.exit(code)
+
+
+def _section() -> None:
+    print(f"    {_DIM}{'─' * 60}{_RESET}")
+
+
+def _heading(title: str) -> None:
+    print(f"\n{_BOLD_MAGENTA}  ▶  {title}{_RESET}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  PATH RESOLUTION
+#  ─────────────────────────────────────────────────────────────────────────────
+#  Rules:
+#    1. If this script's *real* path lives under a system bin directory
+#       (/usr/bin, /usr/local/bin, /bin, /sbin, /usr/sbin), then:
+#         THEME_ROOT  = /usr/share/sddm/themes/aurora-greeter
+#         SYSTEM_MODE = True   → sudo elevation on write
+#    2. Otherwise (development, running from the repo):
+#         THEME_ROOT  = directory that contains this file
+#         SYSTEM_MODE = False  → no elevation
+#
+#  JSON settings file:
+#    • Prefer  /var/lib/sddm/.config/AuroraGreeter/settings.json
+#    • Fall back to {THEME_ROOT}/settings.json when /var/lib/ is not writable
+#      (common during local, non-root development).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_SYSTEM_BIN_PREFIXES = (
+    "/usr/bin",
+    "/usr/local/bin",
+    "/bin",
+    "/sbin",
+    "/usr/sbin",
+    "/usr/local/sbin",
+)
+
+_SYSTEM_THEME_ROOT = Path("/usr/share/sddm/themes/aurora-greeter")
+_SYSTEM_SETTINGS = Path("/var/lib/sddm/.config/AuroraGreeter/settings.json")
+
+
+def _resolve_paths() -> tuple[Path, Path, Path, Path, bool]:
+    """
+    Resolve all runtime paths.
+
+    Returns:
+        (THEME_ROOT, PLAYLISTS_DIR, USER_CONF, SETTINGS_JSON, SYSTEM_MODE)
+    """
+    script_real = Path(os.path.realpath(__file__))
+    script_dir = script_real.parent
+
+    # Determine whether we are in system-installed mode
+    system_mode = any(
+        str(script_real).startswith(prefix)
+        for prefix in _SYSTEM_BIN_PREFIXES
+    )
+
+    if system_mode:
+        theme_root = _SYSTEM_THEME_ROOT
+    else:
+        theme_root = script_dir
+
+    playlists_dir = theme_root / "playlists"
+    user_conf = theme_root / "theme.conf.user"
+
+    # Choose settings.json path
+    if _SYSTEM_SETTINGS.parent.exists():
+        # /var/lib/sddm/.config/AuroraGreeter exists (or can be created)
+        settings_json = _SYSTEM_SETTINGS
+    elif system_mode:
+        # System mode but /var/lib/sddm not yet created — will be created later
+        settings_json = _SYSTEM_SETTINGS
+    else:
+        # Local dev: fall back gracefully to a local settings.json
+        settings_json = theme_root / "settings.json"
+
+    return theme_root, playlists_dir, user_conf, settings_json, system_mode
+
+
+THEME_ROOT, PLAYLISTS_DIR, USER_CONF, SETTINGS_JSON, SYSTEM_MODE = _resolve_paths()
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  PRIVILEGE ELEVATION HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _is_root() -> bool:
+    """Return True when the process is running as UID 0 (root)."""
+    return os.geteuid() == 0
+
+
+def _need_elevation() -> bool:
+    """
+    Return True if a write operation requires privilege elevation.
+
+    Only raises this flag when in system mode AND not already root.
+    Local development mode never requires sudo.
+    """
+    return SYSTEM_MODE and not _is_root()
+
+
+def _reexec_with_sudo() -> None:
+    """
+    Re-execute the current process via sudo, preserving all arguments.
+
+    This is called before any write operation when running in system mode
+    without root privileges.  The function replaces the current process
+    image (execvp), so it never returns on success.
+    """
+    _warn("Write operation requires elevated privileges.")
+    _info("Re-launching with sudo — you may be prompted for your password.")
+    print()
+
+    sudo_cmd = ["sudo", sys.executable] + sys.argv
+    try:
+        os.execvp("sudo", sudo_cmd)
+    except FileNotFoundError:
+        _die("'sudo' was not found on PATH.  Re-run this command as root.")
+    except PermissionError as exc:
+        _die(f"Failed to exec sudo: {exc}")
+
+
+def _ensure_elevated() -> None:
+    """
+    Gate function for write operations.
+
+    If elevation is required but not yet active, re-exec via sudo.
+    If already root or in local mode, this is a no-op.
+    """
+    if _need_elevation():
+        _reexec_with_sudo()
+        # If _reexec_with_sudo() returns (only on failure), die.
+        _die("Privilege re-exec failed.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  FILE / DIRECTORY UTILITIES
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _ensure_dir(path: Path) -> None:
+    """Create a directory (and all parents) if it does not exist."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        _die(f"Permission denied creating directory: {path}")
+    except OSError as exc:
+        _die(f"Could not create directory {path}: {exc}")
+
+
+def _set_perms_644(path: Path) -> None:
+    """Set file permissions to 644 (rw-r--r--)."""
+    try:
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+    except OSError as exc:
+        _warn(f"Could not set permissions on {path}: {exc}")
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """
+    Write *content* to *path* atomically (write to .tmp, then rename).
+
+    This prevents a half-written file from being read by the QML engine
+    if an interrupt occurs mid-write.
+    """
+    _ensure_dir(path.parent)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(path)
+    except PermissionError:
+        _die(f"Permission denied writing to {path}.\n"
+             f"       Hint: run as root or check directory ownership.")
+    except OSError as exc:
+        _die(f"Write failed for {path}: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  JSON SETTINGS  (settings.json)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Default property values — mirrors the QML defaults in Main.qml
+_SETTINGS_DEFAULTS: dict = {
+    "activePlaylist":         "playlists/Background.mp4",
+    "activeMediaSource":      "backgrounds/background.jpg",
+    "activeMultiMonitorMode": "primary-only",
+    "clockFormat":            "24h",
+    "loginCardOpacity":       0.85,
+    "accentColor":            "#89b4fa",
+    # Multi-Backdrop Engine  [mirrors Main.qml persist block]
+    "activeBackgroundType":  "video",      # video | image | slideshow | color
+    "slideshowInterval":     15,            # seconds, 5–60
+    "backgroundColor":       "#1e1e2e",    # solid backdrop color
+    # Performance Profile    [v4 — mirrors Main.qml persist block]
+    "performanceMode":       "auto",        # auto | high | low
+}
+
+
+def _load_settings() -> dict:
+    """
+    Load and return the settings.json dictionary.
+
+    Missing keys are filled in from ``_SETTINGS_DEFAULTS``.
+    An absent or unparsable file returns the defaults without error.
+    """
+    data: dict = dict(_SETTINGS_DEFAULTS)
+    if SETTINGS_JSON.exists():
+        try:
+            raw = json.loads(SETTINGS_JSON.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                data.update(raw)
+        except (json.JSONDecodeError, OSError) as exc:
+            _warn(f"Could not parse {SETTINGS_JSON}: {exc}  (using defaults)")
+    return data
+
+
+def _save_settings(data: dict) -> None:
+    """
+    Persist the settings dictionary to SETTINGS_JSON.
+
+    Writes are atomic and preserve all existing keys (a merge, not replace).
+    """
+    _ensure_elevated()
+    existing = _load_settings()
+    existing.update(data)
+    _atomic_write(SETTINGS_JSON, json.dumps(existing, indent=2) + "\n")
+    _set_perms_644(SETTINGS_JSON)
+    _ok(f"Settings written → {SETTINGS_JSON}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  THEME.CONF.USER  (INI-style)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_user_conf() -> configparser.ConfigParser:
+    """
+    Load theme.conf.user into a ConfigParser.
+
+    If the file does not exist, return an empty parser with a [General]
+    section so callers can write to it immediately.
+    """
+    cp = configparser.ConfigParser(
+        # Preserve key case (theme.conf uses camelCase keys)
+        strict=False,
+        interpolation=None,
+    )
+    cp.optionxform = str
+    # configparser needs at least one section header; our file starts with
+    # [General] which satisfies that requirement.
+    if USER_CONF.exists():
+        try:
+            cp.read(USER_CONF, encoding="utf-8")
+        except configparser.Error as exc:
+            _warn(f"Could not parse {USER_CONF}: {exc}  (starting fresh)")
+    if not cp.has_section("General"):
+        cp.add_section("General")
+    return cp
+
+
+def _save_user_conf(cp: configparser.ConfigParser) -> None:
+    """
+    Write the ConfigParser back to theme.conf.user without corrupting it.
+
+    configparser writes a trailing newline after each section header and
+    after each key=value pair, which is valid INI syntax and matches the
+    existing file style.
+    """
+    _ensure_elevated()
+    import io
+    buf = io.StringIO()
+    cp.write(buf)
+    raw = buf.getvalue()
+
+    # configparser prefixes sections with a blank line and writes keys as
+    # "key = value" (with spaces around '='), but theme.conf uses "key=value".
+    # Normalise to the existing style:
+    raw = raw.replace(" = ", "=")
+
+    _atomic_write(USER_CONF, raw)
+    _set_perms_644(USER_CONF)
+    _ok(f"User config written → {USER_CONF}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  INPUT VALIDATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+_HEX_COLOR_RE = re.compile(
+    r"^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$")
+_VALID_MONITOR_MODES = {"mirror", "primary-only", "blank-auxiliary"}
+_VALID_ORDER_MODES = {"shuffled", "sequential"}
+
+# Media file extensions supported by the QML engine / GStreamer pipeline
+_VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"}
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+_PLAYLIST_EXTS = {".m3u", ".m3u8"}
+
+
+def _validate_hex_color(value: str) -> str:
+    """
+    Validate and normalise a CSS hex colour string.
+
+    Accepts #RGB, #RRGGBB, or #AARRGGBB (case-insensitive).
+    Returns the value uppercased on success; calls _die() on failure.
+    """
+    v = value.strip()
+    if not v.startswith("#"):
+        v = "#" + v
+    if not _HEX_COLOR_RE.match(v):
+        _die(
+            f"Invalid hex color: '{value}'\n"
+            f"       Expected formats: #RGB, #RRGGBB, or #AARRGGBB\n"
+            f"       Example: --accent '#89b4fa'"
+        )
+    return v
+
+
+def _validate_opacity(value: str) -> float:
+    """Parse and validate a float in [0.0 … 1.0]."""
+    try:
+        f = float(value)
+    except ValueError:
+        _die(f"Invalid opacity value: '{value}'  (must be a number like 0.72)")
+    if not 0.0 <= f <= 1.0:
+        _die(f"Opacity {f} is out of range.  Must be between 0.0 and 1.0.")
+    return round(f, 4)
+
+
+def _validate_radius(value: str) -> int:
+    """Parse and validate a non-negative integer pixel radius."""
+    try:
+        n = int(value)
+    except ValueError:
+        _die(
+            f"Invalid radius value: '{value}'  (must be a non-negative integer)")
+    if n < 0:
+        _die(f"Radius {n} is negative — must be ≥ 0.")
+    return n
+
+
+def _validate_hour(value: str, label: str) -> int:
+    """Parse and validate an integer clock-hour in [0 … 23]."""
+    try:
+        h = int(value)
+    except ValueError:
+        _die(
+            f"Invalid value for {label}: '{value}'  (must be an integer 0–23)")
+    if not 0 <= h <= 23:
+        _die(f"{label} = {h} is out of range.  Must be between 0 and 23.")
+    return h
+
+
+def _classify_input(path_or_url: str) -> str:
+    """
+    Classify the wallpaper input as one of:
+      'video'    — local video file
+      'image'    — local image file
+      'playlist' — local .m3u file
+      'url'      — http/https/rtsp URL (video or .m3u)
+    """
+    parsed = urlparse(path_or_url)
+    if parsed.scheme in ("http", "https", "rtsp", "rtsps", "mms"):
+        return "url"
+
+    p = Path(path_or_url)
+    ext = p.suffix.lower()
+
+    if ext in _VIDEO_EXTS:
+        return "video"
+    if ext in _IMAGE_EXTS:
+        return "image"
+    if ext in _PLAYLIST_EXTS:
+        return "playlist"
+
+    # Unknown extension — try to guess from existence
+    if p.exists():
+        # Treat unknown local files as video (GStreamer will decide)
+        return "video"
+
+    _die(
+        f"Cannot classify input: '{path_or_url}'\n"
+        f"       Supported: local video ({', '.join(sorted(_VIDEO_EXTS))}),\n"
+        f"                  local image ({', '.join(sorted(_IMAGE_EXTS))}),\n"
+        f"                  .m3u playlist, or http/https URL."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SUBCOMMAND A: playlist
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _playlist_create(args: argparse.Namespace) -> None:
+    """
+    Scan <directory> recursively for compatible media and write a .m3u
+    playlist to {THEME_ROOT}/playlists/<name>.m3u.
+
+    The .m3u format used here is the extended variant (#EXTM3U header) to
+    be compatible with our QML playlist reader.  Each entry gets an
+    #EXTINF line with duration=-1 (unknown) and the filename as the title.
+    """
+    _heading("playlist create")
+    _ensure_elevated()
+
+    name = args.name.strip()
+    src = Path(args.directory).expanduser().resolve()
+
+    # ── Validation ────────────────────────────────────────────────────────────
+    if not src.exists():
+        _die(f"Source directory does not exist: {src}")
+    if not src.is_dir():
+        _die(f"Source path is not a directory: {src}")
+
+    # Sanitise playlist name (no path separators, no double dots)
+    safe_name = re.sub(r"[^A-Za-z0-9_\-.]", "_", name)
+    safe_name = re.sub(r"\.{2,}", ".", safe_name)
+    if not safe_name:
+        _die("Playlist name resolves to an empty string after sanitisation.")
+
+    out_path = PLAYLISTS_DIR / f"{safe_name}.m3u"
+    _ensure_dir(PLAYLISTS_DIR)
+
+    _info(f"Scanning:  {src}")
+    _info(f"Output:    {out_path}")
+
+    # ── File scan ─────────────────────────────────────────────────────────────
+    all_exts = _VIDEO_EXTS | _IMAGE_EXTS
+    found: list[Path] = []
+
+    for entry in sorted(src.rglob("*")):
+        if entry.is_file() and entry.suffix.lower() in all_exts:
+            found.append(entry)
+
+    if not found:
+        _die(
+            f"No compatible media files found in: {src}\n"
+            f"       Supported: {', '.join(sorted(all_exts))}"
+        )
+
+    _info(f"Found {len(found)} compatible file(s).")
+
+    # ── Build .m3u content ────────────────────────────────────────────────────
+    lines: list[str] = ["#EXTM3U", ""]
+
+    for f in found:
+        title = f.stem
+        lines.append(f"#EXTINF:-1,{title}")
+        lines.append(str(f))
+        lines.append("")
+
+    content = "\n".join(lines)
+
+    # ── Write ─────────────────────────────────────────────────────────────────
+    _atomic_write(out_path, content)
+    _set_perms_644(out_path)
+
+    _ok(f"Playlist created: {out_path}")
+    _ok(f"Entries: {len(found)}")
+    _section()
+    _info("To activate:  sddm-aurora-ctl wallpaper set " + str(out_path))
+    print()
+
+
+def _playlist_order(args: argparse.Namespace) -> None:
+    """
+    Inject or update the #EXT-ORDER directive at the top of an existing
+    .m3u playlist file.
+
+    Directive values:
+      SHUFFLED    — signals our QML engine to apply Fisher-Yates before play
+      SEQUENTIAL  — signals alphabetical / file-order playback
+    """
+    _heading("playlist order")
+    _ensure_elevated()
+
+    name = args.name.strip()
+    order = args.order.strip().lower()
+
+    if order not in _VALID_ORDER_MODES:
+        _die(
+            f"Invalid order mode: '{order}'\n"
+            f"       Valid values: {', '.join(sorted(_VALID_ORDER_MODES))}"
+        )
+
+    playlist_path = PLAYLISTS_DIR / f"{name}.m3u"
+    if not playlist_path.exists():
+        # Also try without adding .m3u (user may have typed the full filename)
+        alt = PLAYLISTS_DIR / name
+        if alt.exists():
+            playlist_path = alt
+        else:
+            _die(
+                f"Playlist not found: {playlist_path}\n"
+                f"       Available playlists in {PLAYLISTS_DIR}:\n"
+                + _list_playlists_str()
+            )
+
+    _info(f"Playlist: {playlist_path}")
+    _info(f"Order:    {order.upper()}")
+
+    content = playlist_path.read_text(encoding="utf-8")
+    lines = content.splitlines(keepends=False)
+
+    directive = f"#EXT-ORDER: {order.upper()}"
+
+    # Remove any existing #EXT-ORDER line
+    lines = [ln for ln in lines if not ln.startswith("#EXT-ORDER:")]
+
+    # Insert immediately after #EXTM3U (or at position 0)
+    if lines and lines[0].startswith("#EXTM3U"):
+        lines.insert(1, directive)
+    else:
+        lines.insert(0, directive)
+
+    _atomic_write(playlist_path, "\n".join(lines) + "\n")
+    _set_perms_644(playlist_path)
+
+    _ok(f"Order directive set: {directive}")
+    _ok(f"Playlist updated: {playlist_path}")
+    print()
+
+
+def _list_playlists_str() -> str:
+    """Return a formatted list of available .m3u files as a string."""
+    if not PLAYLISTS_DIR.exists():
+        return "       (playlists directory does not exist)"
+    playlists = sorted(PLAYLISTS_DIR.glob("*.m3u"))
+    if not playlists:
+        return "       (no playlists found)"
+    return "\n".join(f"         • {p.name}" for p in playlists)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CATALOGUE HELPERS
+#
+#  Reads / writes {THEME_ROOT}/playlists/index.json.
+#  The ConfigDrawer in QML reads this file to populate its playlist picker.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_INDEX_JSON = THEME_ROOT / "playlists" / "index.json"
+
+_INDEX_DEFAULTS: dict = {
+    "version": 1,
+    "video": [
+        {"label": "All Videos", "path": "playlists/Background.mp4", "default": True}
+    ],
+    "image": [
+        {"label": "Default Image", "path": "backgrounds/background.jpg", "default": True}
+    ],
+}
+
+
+def _load_index() -> dict:
+    """
+    Load playlists/index.json.
+
+    Returns the parsed dict (with 'video' and 'image' lists guaranteed to
+    exist).  If the file is absent or malformed, returns the built-in
+    defaults so the catalogue is always in a usable state.
+    """
+    import copy
+    data = copy.deepcopy(_INDEX_DEFAULTS)
+    if _INDEX_JSON.exists():
+        try:
+            raw = json.loads(_INDEX_JSON.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                if isinstance(raw.get("video"), list):
+                    data["video"] = raw["video"]
+                if isinstance(raw.get("image"), list):
+                    data["image"] = raw["image"]
+        except (json.JSONDecodeError, OSError) as exc:
+            _warn(f"Could not parse {_INDEX_JSON}: {exc}  (using defaults)")
+    return data
+
+
+def _save_index(data: dict) -> None:
+    """Persist the catalogue index atomically."""
+    _ensure_elevated()
+    _atomic_write(_INDEX_JSON, json.dumps(data, indent=2) + "\n")
+    _set_perms_644(_INDEX_JSON)
+    _ok(f"Catalogue written → {_INDEX_JSON}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SUBCOMMAND B¹¹½: catalogue
+#
+#  Manages {THEME_ROOT}/playlists/index.json which the ConfigDrawer reads
+#  to populate its playlist / image-source picker dynamically.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _catalogue_list(args: argparse.Namespace) -> None:
+    """
+    Print a formatted view of the current catalogue (index.json contents).
+    """
+    _heading("catalogue list")
+
+    data = _load_index()
+
+    print(f"  {_BOLD_CYAN}Video playlists:{_RESET}")
+    for i, entry in enumerate(data.get("video", [])):
+        tag = f"{_DIM}[default]{_RESET}" if entry.get("default") else ""
+        print(f"    {_GREEN}{i+1}.{_RESET} {_BOLD}{entry.get('label', '?')}{_RESET}  "
+              f"{_DIM}{entry.get('path', '?')}{_RESET}  {tag}")
+    if not data.get("video"):
+        print(f"    {_DIM}(none){_RESET}")
+
+    print()
+    print(f"  {_BOLD_CYAN}Image sources:{_RESET}")
+    for i, entry in enumerate(data.get("image", [])):
+        tag = f"{_DIM}[default]{_RESET}" if entry.get("default") else ""
+        print(f"    {_GREEN}{i+1}.{_RESET} {_BOLD}{entry.get('label', '?')}{_RESET}  "
+              f"{_DIM}{entry.get('path', '?')}{_RESET}  {tag}")
+    if not data.get("image"):
+        print(f"    {_DIM}(none){_RESET}")
+    print()
+
+
+def _catalogue_add_video(args: argparse.Namespace) -> None:
+    """
+    Scan *folder* for video files, create a named .m3u playlist in
+    {THEME_ROOT}/playlists/, and register it in index.json.
+
+    The generated playlist uses absolute paths so GStreamer can open the
+    files regardless of where SDDM is launched from.
+    """
+    _heading("catalogue add-video")
+    _ensure_elevated()
+
+    label = args.label.strip()
+    folder = Path(args.folder).expanduser().resolve()
+
+    if not folder.exists() or not folder.is_dir():
+        _die(f"Folder does not exist or is not a directory: {folder}")
+
+    if not label:
+        _die("Label must not be empty.")
+
+    # Sanitise label into a safe filename
+    safe_name = re.sub(r"[^A-Za-z0-9_\-.]", "_", label)
+    safe_name = re.sub(r"\.{2,}", ".", safe_name).strip("_-")
+    if not safe_name:
+        _die("Label resolves to an empty filename after sanitisation.")
+
+    _info(f"Label:   {label}")
+    _info(f"Folder:  {folder}")
+
+    # Scan for video files
+    found: list[Path] = sorted(
+        f for f in folder.rglob("*")
+        if f.is_file() and f.suffix.lower() in _VIDEO_EXTS
+    )
+    if not found:
+        _die(
+            f"No video files found in: {folder}\n"
+            f"       Supported: {', '.join(sorted(_VIDEO_EXTS))}"
+        )
+    _info(f"Found {len(found)} video file(s).")
+
+    # Write .m3u playlist
+    _ensure_dir(PLAYLISTS_DIR)
+    out_path = PLAYLISTS_DIR / f"{safe_name}.m3u"
+    lines: list[str] = ["#EXTM3U", ""]
+    for f in found:
+        lines.append(f"#EXTINF:-1,{f.stem}")
+        lines.append(str(f))
+        lines.append("")
+    _atomic_write(out_path, "\n".join(lines))
+    _set_perms_644(out_path)
+    _ok(f"Playlist written: {out_path}  ({len(found)} entries)")
+
+    # Register in index.json
+    # Store a theme-relative path so the QML engine resolves it against
+    # the theme root regardless of where SDDM is installed.
+    rel_path = "playlists/" + out_path.name
+    data = _load_index()
+
+    # Prevent duplicate labels
+    existing_labels = {e.get("label", "") for e in data.get("video", [])}
+    if label in existing_labels:
+        _warn(f"A video entry named '{label}' already exists — updating path.")
+        for e in data["video"]:
+            if e.get("label") == label:
+                e["path"] = rel_path
+    else:
+        data.setdefault("video", []).append({"label": label, "path": rel_path})
+
+    _save_index(data)
+    _ok(f"Registered in catalogue: \"{label}\" → {rel_path}")
+    _section()
+    _info("Open the settings drawer (Alt+S) to see the new playlist.")
+    print()
+
+
+def _catalogue_add_image(args: argparse.Namespace) -> None:
+    """
+    Copy an image file into {THEME_ROOT}/backgrounds/ and register it in
+    index.json so the ConfigDrawer can offer it as an image/slideshow source.
+    """
+    _heading("catalogue add-image")
+    _ensure_elevated()
+
+    label = args.label.strip()
+    src = Path(args.path).expanduser().resolve()
+
+    if not label:
+        _die("Label must not be empty.")
+    if not src.exists() or not src.is_file():
+        _die(f"Image file does not exist: {src}")
+    if src.suffix.lower() not in _IMAGE_EXTS:
+        _die(
+            f"Unsupported image extension: '{src.suffix}'\n"
+            f"       Supported: {', '.join(sorted(_IMAGE_EXTS))}"
+        )
+
+    _info(f"Label:  {label}")
+    _info(f"Source: {src}")
+
+    # Copy into backgrounds/
+    bg_dir = THEME_ROOT / "backgrounds"
+    _ensure_dir(bg_dir)
+    dest = bg_dir / src.name
+    if src != dest:
+        _info(f"Copying → {dest}")
+        import shutil as _shutil
+        _shutil.copy2(str(src), str(dest))
+        _set_perms_644(dest)
+    _ok(f"Image installed: {dest}")
+
+    # Register in index.json
+    rel_path = "backgrounds/" + dest.name
+    data = _load_index()
+
+    existing_labels = {e.get("label", "") for e in data.get("image", [])}
+    if label in existing_labels:
+        _warn(
+            f"An image entry named '{label}' already exists — updating path.")
+        for e in data["image"]:
+            if e.get("label") == label:
+                e["path"] = rel_path
+    else:
+        data.setdefault("image", []).append({"label": label, "path": rel_path})
+
+    _save_index(data)
+    _ok(f"Registered in catalogue: \"{label}\" → {rel_path}")
+    _section()
+    _info("Open the settings drawer (Alt+S) and switch to Image mode to see it.")
+    print()
+
+
+def _catalogue_remove(args: argparse.Namespace) -> None:
+    """
+    Remove a named entry (video or image) from index.json.
+
+    Does NOT delete the underlying .mp4 / .m3u / image file—only the
+    catalogue registration is removed.  The --type flag selects which
+    section to search (default: auto-detect from the label).
+    """
+    _heading("catalogue remove")
+    _ensure_elevated()
+
+    label = args.label.strip()
+    section = args.type   # "video", "image", or None (auto)
+
+    data = _load_index()
+    removed = False
+
+    sections = ([section] if section else ["video", "image"])
+    for sec in sections:
+        entries = data.get(sec, [])
+        filtered = [e for e in entries if e.get("label") != label]
+        if len(filtered) < len(entries):
+            data[sec] = filtered
+            removed = True
+            _ok(f"Removed '{label}' from {sec} section.")
+
+    if not removed:
+        _die(
+            f"No entry named '{label}' found in the catalogue.\n"
+            f"       Use 'sddm-aurora-ctl catalogue list' to see available entries."
+        )
+
+    _save_index(data)
+    _section()
+    _info("Changes take effect the next time the settings drawer is opened.")
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SUBCOMMAND B: wallpaper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _wallpaper_set(args: argparse.Namespace) -> None:
+    """
+    Change the active backdrop.
+
+    Logic:
+      1. Classify the input as video / image / playlist / url.
+      2. For local files: copy into the appropriate theme subdirectory,
+         set 644 permissions, and record the theme-relative path.
+      3. For URLs: write the URL directly to activePlaylist (the QML
+         engine passes URLs straight to MediaPlayer.source).
+      4. Persist the new activePlaylist value to settings.json.
+    """
+    _heading("wallpaper set")
+    _ensure_elevated()
+
+    source = args.source.strip()
+    kind = _classify_input(source)
+
+    _info(f"Input:      {source}")
+    _info(f"Classified: {kind}")
+
+    active_playlist: str
+
+    if kind == "url":
+        # Write URL directly; QML handles streaming via GStreamer
+        active_playlist = source
+        _ok(f"URL will be used directly as backdrop source.")
+
+    elif kind == "playlist":
+        src_path = Path(source).expanduser().resolve()
+        if not src_path.exists():
+            _die(f"Playlist file not found: {src_path}")
+
+        _ensure_dir(PLAYLISTS_DIR)
+        dest = PLAYLISTS_DIR / src_path.name
+
+        if src_path != dest:
+            _info(f"Copying → {dest}")
+            shutil.copy2(str(src_path), str(dest))
+            _set_perms_644(dest)
+            _ok(f"Playlist installed: {dest}")
+        else:
+            _ok(f"Playlist already in playlists/: {dest.name}")
+
+        # Store theme-relative path (what QML resolves against its root)
+        active_playlist = "playlists/" + dest.name
+
+    elif kind == "video":
+        src_path = Path(source).expanduser().resolve()
+        if not src_path.exists():
+            _die(f"Video file not found: {src_path}")
+
+        bg_dir = THEME_ROOT / "backgrounds"
+        _ensure_dir(bg_dir)
+        dest = bg_dir / src_path.name
+
+        _info(f"Copying video → {dest}")
+        shutil.copy2(str(src_path), str(dest))
+        _set_perms_644(dest)
+        _ok(f"Video installed: {dest}")
+
+        active_playlist = "backgrounds/" + dest.name
+
+    elif kind == "image":
+        src_path = Path(source).expanduser().resolve()
+        if not src_path.exists():
+            _die(f"Image file not found: {src_path}")
+
+        bg_dir = THEME_ROOT / "backgrounds"
+        _ensure_dir(bg_dir)
+        dest = bg_dir / src_path.name
+
+        _info(f"Copying image → {dest}")
+        shutil.copy2(str(src_path), str(dest))
+        _set_perms_644(dest)
+        _ok(f"Image installed: {dest}")
+
+        active_playlist = "backgrounds/" + dest.name
+
+    else:
+        _die(f"Unhandled media kind: {kind}")  # Should never happen
+
+    # ── Persist to settings.json ───────────────────────────────────────────────
+    _save_settings({"activePlaylist": active_playlist})
+    _ok(f"activePlaylist → \"{active_playlist}\"")
+    _section()
+    _info("Changes take effect at the next SDDM session.")
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SUBCOMMAND C: scheduler
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _scheduler_set_time(args: argparse.Namespace) -> None:
+    """
+    Update day_time_start and day_time_end in theme.conf.user.
+
+    The file is parsed with configparser to preserve all existing keys
+    while updating only the two time fields.  If the file does not exist
+    it is created fresh with a [General] section.
+    """
+    _heading("scheduler set-time")
+    _ensure_elevated()
+
+    day_start = _validate_hour(str(args.day_start), "--day-start")
+    day_end = _validate_hour(str(args.day_end),   "--day-end")
+
+    if day_start == day_end:
+        _warn(
+            f"day_time_start ({day_start}) equals day_time_end ({day_end}). "
+            "The day/night window will be zero-length — day mode never activates."
+        )
+
+    _info(f"Day window: {day_start:02d}:00 → {day_end:02d}:00")
+    _info(f"Config:     {USER_CONF}")
+
+    cp = _load_user_conf()
+    cp.set("General", "day_time_start", str(day_start))
+    cp.set("General", "day_time_end",   str(day_end))
+    _save_user_conf(cp)
+
+    _ok(f"day_time_start = {day_start}")
+    _ok(f"day_time_end   = {day_end}")
+    _section()
+    _info("Changes take effect at the next SDDM session.")
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SUBCOMMAND D: config
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _config_set_theme(args: argparse.Namespace) -> None:
+    """
+    Update one or more aesthetic parameters in settings.json.
+
+    Each flag is optional; only specified flags are written.  Unspecified
+    values retain their current values in settings.json.
+    """
+    _heading("config set-theme")
+
+    # ── Validate all provided arguments before touching any file ──────────────
+    updates: dict = {}
+
+    if args.accent is not None:
+        color = _validate_hex_color(args.accent)
+        updates["accentColor"] = color
+        _info(f"accentColor   → {color}")
+
+    if args.opacity is not None:
+        opacity = _validate_opacity(args.opacity)
+        updates["loginCardOpacity"] = opacity
+        _info(f"loginCardOpacity → {opacity}")
+
+    if args.radius is not None:
+        radius = _validate_radius(args.radius)
+        # borderRadius lives in theme.conf / theme.conf.user (not settings.json)
+        # We write it to user conf so the QML engine picks it up.
+        _info(f"borderRadius  → {radius}px  (written to theme.conf.user)")
+
+    if args.monitor_mode is not None:
+        mode = args.monitor_mode.strip().lower()
+        if mode not in _VALID_MONITOR_MODES:
+            _die(
+                f"Invalid monitor mode: '{mode}'\n"
+                f"       Valid values: {', '.join(sorted(_VALID_MONITOR_MODES))}"
+            )
+        updates["activeMultiMonitorMode"] = mode
+        _info(f"activeMultiMonitorMode → {mode}")
+
+    # [NEW] backdrop type
+    if args.bg_type is not None:
+        bg = args.bg_type.strip().lower()
+        valid_bg = {"video", "image", "slideshow", "color"}
+        if bg not in valid_bg:
+            _die(
+                f"Invalid backdrop type: '{bg}'\n"
+                f"       Valid values: {', '.join(sorted(valid_bg))}"
+            )
+        updates["activeBackgroundType"] = bg
+        _info(f"activeBackgroundType  → {bg}")
+
+    # [NEW] background color
+    if args.bg_color is not None:
+        color = _validate_hex_color(args.bg_color)
+        updates["backgroundColor"] = color
+        _info(f"backgroundColor       → {color}")
+
+    # [NEW] slideshow interval
+    if args.slideshow_interval is not None:
+        try:
+            iv = int(args.slideshow_interval)
+        except ValueError:
+            _die(
+                f"Invalid slideshow interval: '{args.slideshow_interval}'  (must be an integer)")
+        if not 5 <= iv <= 60:
+            _die(
+                f"Slideshow interval {iv} is out of range.  Must be between 5 and 60 seconds.")
+        updates["slideshowInterval"] = iv
+        _info(f"slideshowInterval     → {iv}s")
+
+    # [NEW v4] performance mode
+    if args.performance_mode is not None:
+        pm = args.performance_mode.strip().lower()
+        if pm not in {"auto", "high", "low"}:
+            _die(
+                f"Invalid performance mode: '{pm}'\n"
+                f"       Valid values: auto | high | low"
+            )
+        updates["performanceMode"] = pm
+        _info(f"performanceMode       → {pm}")
+
+    if not updates and args.radius is None:
+        _die(
+            "No options specified.  At least one of --accent, --opacity, "
+            "--radius, --monitor-mode, --bg-type, --bg-color, "
+            "--slideshow-interval, or --performance-mode is required."
+        )
+
+    _ensure_elevated()
+
+    # ── Write settings.json ───────────────────────────────────────────────────
+    if updates:
+        _save_settings(updates)
+
+    # ── Write borderRadius to theme.conf.user ─────────────────────────────────
+    if args.radius is not None:
+        radius = _validate_radius(args.radius)
+        cp = _load_user_conf()
+        cp.set("General", "borderRadius", str(radius))
+        _save_user_conf(cp)
+        _ok(f"borderRadius = {radius}px → {USER_CONF}")
+
+    _section()
+    _info("Changes take effect at the next SDDM session.")
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SUBCOMMAND E: hw-accel
+#
+#  Thin Python wrapper around install-hw-accel.sh.
+#  Resolves the shell script path relative to the same directory as this
+#  Python script (or the theme root in system mode) and exec-forwards
+#  arguments.  All heavy logic lives in the shell script.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _hw_accel_script_path() -> Path:
+    """
+    Locate install-hw-accel.sh alongside this Python script.
+
+    In development mode the script and the shell script are siblings in the
+    same directory.  In system-installed mode the shell script is expected
+    at THEME_ROOT (e.g. /usr/share/sddm/themes/aurora-greeter/install-hw-accel.sh)
+    or alongside the ctl binary in /usr/bin/ or /usr/share/sddm/themes/aurora-greeter/.
+    """
+    candidates = [
+        Path(os.path.realpath(__file__)).parent / "install-hw-accel.sh",
+        THEME_ROOT / "install-hw-accel.sh",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]   # return primary path even if missing (error later)
+
+
+def _hw_accel_run(action: str, extra_args: list[str]) -> None:
+    """
+    Execute install-hw-accel.sh with the given action flag.
+
+    The shell script performs its own root check for install/uninstall;
+    we simply forward stdin/stdout/stderr.
+    """
+    import subprocess
+
+    script = _hw_accel_script_path()
+    if not script.exists():
+        _die(
+            f"install-hw-accel.sh not found at: {script}\n"
+            f"       Ensure the file ships alongside sddm-aurora-ctl."
+        )
+
+    # Ensure the script is executable
+    if not os.access(str(script), os.X_OK):
+        try:
+            script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+        except OSError as exc:
+            _warn(f"Could not mark {script} as executable: {exc}")
+
+    cmd = ["bash", str(script), f"--{action}"] + extra_args
+    try:
+        result = subprocess.run(cmd, check=False)
+        sys.exit(result.returncode)
+    except FileNotFoundError:
+        _die("bash not found on PATH.")
+
+
+def _hw_accel_install(args: argparse.Namespace) -> None:
+    """Install the GStreamer HW acceleration systemd drop-in."""
+    _heading("hw-accel install")
+    extra: list[str] = []
+    if getattr(args, "dry_run", False):
+        extra.append("--dry-run")
+    if getattr(args, "force_gpu", None):
+        extra += ["--force-gpu", args.force_gpu]
+    _hw_accel_run("install", extra)
+
+
+def _hw_accel_uninstall(args: argparse.Namespace) -> None:
+    """Remove the GStreamer HW acceleration systemd drop-in."""
+    _heading("hw-accel uninstall")
+    extra: list[str] = []
+    if getattr(args, "dry_run", False):
+        extra.append("--dry-run")
+    _hw_accel_run("uninstall", extra)
+
+
+def _hw_accel_status(args: argparse.Namespace) -> None:
+    """Show hardware detection results and current drop-in state."""
+    _heading("hw-accel status")
+    _hw_accel_run("status", [])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SUBCOMMAND E: status  (diagnostic overview — bonus quality-of-life command)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _status(args: argparse.Namespace) -> None:
+    """
+    Print a diagnostic overview of all resolved paths and current settings.
+    Useful for troubleshooting both development and system deployments.
+    """
+    _heading("status / diagnostic overview")
+
+    mode_label = (
+        f"{_BOLD_RED}SYSTEM (writes require root){_RESET}" if SYSTEM_MODE
+        else f"{_BOLD_GREEN}LOCAL DEVELOPMENT{_RESET}"
+    )
+
+    print(f"  {_BOLD}Operating mode:{_RESET}  {mode_label}")
+    print(f"  {_BOLD}Running as:{_RESET}      {'root (UID 0)' if _is_root() else f'user UID {os.getuid()}'}")
+    print()
+
+    # Paths
+    rows = [
+        ("THEME_ROOT",    THEME_ROOT),
+        ("PLAYLISTS_DIR", PLAYLISTS_DIR),
+        ("USER_CONF",     USER_CONF),
+        ("SETTINGS_JSON", SETTINGS_JSON),
+    ]
+    print(f"  {_BOLD_CYAN}Resolved paths:{_RESET}")
+    for label, path in rows:
+        exists_tag = (
+            f"{_GREEN}✔ exists{_RESET}" if path.exists()
+            else f"{_YELLOW}✘ missing{_RESET}"
+        )
+        print(f"    {_DIM}{label:<16}{_RESET}  {path}  [{exists_tag}]")
+    print()
+
+    # Current settings.json
+    print(f"  {_BOLD_CYAN}Current settings.json:{_RESET}")
+    settings = _load_settings()
+    for key, val in settings.items():
+        print(f"    {_DIM}{key:<26}{_RESET}  {_BOLD}{val}{_RESET}")
+    print()
+
+    # Available playlists
+    print(f"  {_BOLD_CYAN}Available playlists:{_RESET}")
+    print(_list_playlists_str())
+    print()
+
+    # Catalogue index
+    index_data = _load_index()
+    print(f"  {_BOLD_CYAN}Catalogue index  [{_INDEX_JSON}]:{_RESET}")
+    print(f"    {_DIM}Video entries:{_RESET}")
+    for e in index_data.get("video", []):
+        tag = " [default]" if e.get("default") else ""
+        print(f"      • {e.get('label', '?')} → {e.get('path', '?')}{tag}")
+    print(f"    {_DIM}Image entries:{_RESET}")
+    for e in index_data.get("image", []):
+        tag = " [default]" if e.get("default") else ""
+        print(f"      • {e.get('label', '?')} → {e.get('path', '?')}{tag}")
+    print()
+
+    # Current theme.conf.user
+    print(f"  {_BOLD_CYAN}theme.conf.user  [{USER_CONF}]:{_RESET}")
+    if USER_CONF.exists():
+        cp = _load_user_conf()
+        for key, val in cp.items("General"):
+            print(f"    {_DIM}{key:<26}{_RESET}  {val}")
+    else:
+        print(
+            f"    {_YELLOW}(file does not exist — defaults from theme.conf are used){_RESET}")
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ARGUMENT PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="sddm-aurora-ctl",
+        description=(
+            "Command-line companion for the Aurora Greeter theme.\n"
+            "Manages playlists, wallpapers, scheduler timings, and config."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            f"Examples:\n"
+            f"  sddm-aurora-ctl status\n"
+            f"  sddm-aurora-ctl catalogue list\n"
+            f"  sddm-aurora-ctl catalogue add-video 'City Nights' ~/Videos/city\n"
+            f"  sddm-aurora-ctl catalogue add-image 'Mountain' ~/Pictures/mountain.jpg\n"
+            f"  sddm-aurora-ctl catalogue remove 'City Nights'\n"
+            f"  sddm-aurora-ctl playlist create myvids ~/Videos/wallpapers\n"
+            f"  sddm-aurora-ctl playlist order myvids shuffled\n"
+            f"  sddm-aurora-ctl wallpaper set ~/Videos/city.mp4\n"
+            f"  sddm-aurora-ctl wallpaper set https://example.com/live.m3u8\n"
+            f"  sddm-aurora-ctl scheduler set-time --day-start 7 --day-end 20\n"
+            f"  sddm-aurora-ctl config set-theme --accent '#89b4fa' --opacity 0.85\n"
+            f"  sddm-aurora-ctl config set-theme --monitor-mode primary-only\n"
+        ),
+    )
+
+    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    # ── status ────────────────────────────────────────────────────────────────
+    sub_status = subparsers.add_parser(
+        "status",
+        help="show diagnostic overview of paths and current settings",
+    )
+    sub_status.set_defaults(func=_status)
+
+    # ── catalogue ─────────────────────────────────────────────────────────────
+    sub_cat = subparsers.add_parser(
+        "catalogue",
+        help="manage the playlist / image-source catalogue (index.json)",
+        description=(
+            "Manages playlists/index.json which the ConfigDrawer reads to\n"
+            "populate its playlist and image-source picker dynamically.\n"
+            "Changes appear in the settings drawer immediately on next open."
+        ),
+    )
+    cat_sub = sub_cat.add_subparsers(dest="action", metavar="ACTION")
+
+    # catalogue list
+    cat_list = cat_sub.add_parser(
+        "list",
+        help="show all registered video and image catalogue entries",
+    )
+    cat_list.set_defaults(func=_catalogue_list)
+
+    # catalogue add-video
+    cat_av = cat_sub.add_parser(
+        "add-video",
+        help="scan a folder for videos, create a playlist, register in catalogue",
+    )
+    cat_av.add_argument(
+        "label",
+        help="display name shown in the settings drawer  (e.g. 'My Landscapes')",
+    )
+    cat_av.add_argument(
+        "folder",
+        help="directory to scan recursively for video files",
+    )
+    cat_av.set_defaults(func=_catalogue_add_video)
+
+    # catalogue add-image
+    cat_ai = cat_sub.add_parser(
+        "add-image",
+        help="register an image file as a selectable image / slideshow source",
+    )
+    cat_ai.add_argument(
+        "label",
+        help="display name shown in the settings drawer  (e.g. 'Mountain Sunset')",
+    )
+    cat_ai.add_argument(
+        "path",
+        help="absolute path to the image file to install",
+    )
+    cat_ai.set_defaults(func=_catalogue_add_image)
+
+    # catalogue remove
+    cat_rm = cat_sub.add_parser(
+        "remove",
+        help="remove a named entry from the catalogue (does not delete the file)",
+    )
+    cat_rm.add_argument(
+        "label",
+        help="exact display name of the entry to remove",
+    )
+    cat_rm.add_argument(
+        "--type",
+        metavar="SECTION",
+        default=None,
+        choices=["video", "image"],
+        help="restrict search to 'video' or 'image' section  (default: search both)",
+    )
+    cat_rm.set_defaults(func=_catalogue_remove)
+
+    # ── playlist ──────────────────────────────────────────────────────────────
+    sub_pl = subparsers.add_parser(
+        "playlist",
+        help="manage video/image playlists (.m3u)",
+    )
+
+    pl_sub = sub_pl.add_subparsers(dest="action", metavar="ACTION")
+
+    # playlist create
+    pl_create = pl_sub.add_parser(
+        "create",
+        help="scan a directory and generate a .m3u playlist",
+    )
+    pl_create.add_argument(
+        "name",
+        help="playlist name (no extension); e.g. 'summer_nights'",
+    )
+    pl_create.add_argument(
+        "directory",
+        help="directory to scan for media files (recursive)",
+    )
+    pl_create.set_defaults(func=_playlist_create)
+
+    # playlist order
+    pl_order = pl_sub.add_parser(
+        "order",
+        help="set playback order hint on an existing playlist",
+    )
+    pl_order.add_argument(
+        "name",
+        help="playlist name (without .m3u extension)",
+    )
+    pl_order.add_argument(
+        "order",
+        choices=list(_VALID_ORDER_MODES),
+        help="playback order: 'shuffled' or 'sequential'",
+    )
+    pl_order.set_defaults(func=_playlist_order)
+
+    # ── wallpaper ─────────────────────────────────────────────────────────────
+    sub_wp = subparsers.add_parser(
+        "wallpaper",
+        help="change the active backdrop (video / image / playlist / URL)",
+    )
+    wp_sub = sub_wp.add_subparsers(dest="action", metavar="ACTION")
+
+    wp_set = wp_sub.add_parser(
+        "set",
+        help="set the active wallpaper/playlist source",
+    )
+    wp_set.add_argument(
+        "source",
+        help=(
+            "local file path (video, image, or .m3u) "
+            "or an http/https streaming URL"
+        ),
+    )
+    wp_set.set_defaults(func=_wallpaper_set)
+
+    # ── scheduler ─────────────────────────────────────────────────────────────
+    sub_sched = subparsers.add_parser(
+        "scheduler",
+        help="configure day/night time-based activation windows",
+    )
+    sched_sub = sub_sched.add_subparsers(dest="action", metavar="ACTION")
+
+    sched_time = sched_sub.add_parser(
+        "set-time",
+        help="set the start and end hour for day-mode activation",
+    )
+    sched_time.add_argument(
+        "--day-start",
+        required=True,
+        metavar="HOUR",
+        help="hour (0–23) when day mode begins",
+    )
+    sched_time.add_argument(
+        "--day-end",
+        required=True,
+        metavar="HOUR",
+        help="hour (0–23) when day mode ends (night mode begins)",
+    )
+    sched_time.set_defaults(func=_scheduler_set_time)
+
+    # ── config ────────────────────────────────────────────────────────────────
+    sub_cfg = subparsers.add_parser(
+        "config",
+        help="modify aesthetic metrics and display options",
+    )
+    cfg_sub = sub_cfg.add_subparsers(dest="action", metavar="ACTION")
+
+    cfg_theme = cfg_sub.add_parser(
+        "set-theme",
+        help="update accent color, opacity, border radius, or monitor mode",
+    )
+    cfg_theme.add_argument(
+        "--accent",
+        metavar="COLOR",
+        default=None,
+        help="CSS hex accent color, e.g. '#89b4fa'  (3, 6, or 8 hex digits)",
+    )
+    cfg_theme.add_argument(
+        "--opacity",
+        metavar="FLOAT",
+        default=None,
+        help="login card background opacity  [0.0 – 1.0]",
+    )
+    cfg_theme.add_argument(
+        "--radius",
+        metavar="PIXELS",
+        default=None,
+        help="border radius in pixels for the login card (integer ≥ 0)",
+    )
+    cfg_theme.add_argument(
+        "--monitor-mode",
+        metavar="MODE",
+        default=None,
+        choices=list(_VALID_MONITOR_MODES),
+        help=(
+            "multi-monitor mode: "
+            "'mirror' | 'primary-only' | 'blank-auxiliary'"
+        ),
+    )
+    # [NEW] Multi-Backdrop Engine controls
+    cfg_theme.add_argument(
+        "--bg-type",
+        metavar="TYPE",
+        default=None,
+        choices=["video", "image", "slideshow", "color"],
+        help="backdrop mode: 'video' | 'image' | 'slideshow' | 'color'",
+    )
+    cfg_theme.add_argument(
+        "--bg-color",
+        metavar="COLOR",
+        default=None,
+        help="solid background hex color for --bg-type color  (e.g. '#1e1e2e')",
+    )
+    cfg_theme.add_argument(
+        "--slideshow-interval",
+        metavar="SECONDS",
+        default=None,
+        help="slideshow image duration in seconds  [5–60]",
+    )
+    # [NEW v4] Performance profile
+    cfg_theme.add_argument(
+        "--performance-mode",
+        metavar="MODE",
+        default=None,
+        choices=["auto", "high", "low"],
+        help=(
+            "video rendering quality profile:\n"
+            "  auto  — screen-adaptive (default): ≤1920px wide → 2K, wider → 4K\n"
+            "  high  — always use highest available quality (may be 4K)\n"
+            "  low   — force 2K URLs + fast animations (best for iGPU)"
+        ),
+    )
+    cfg_theme.set_defaults(func=_config_set_theme)
+
+    # ── hw-accel ──────────────────────────────────────────────────────────────────
+    sub_hw = subparsers.add_parser(
+        "hw-accel",
+        help="GStreamer hardware acceleration: install / remove / status",
+        description=(
+            "Installs or removes a systemd drop-in that configures GStreamer\n"
+            "hardware video decode (NVDEC, VA-API) for the SDDM service.\n"
+            "Reduces CPU decode load on low-profile hardware."
+        ),
+    )
+    hw_sub = sub_hw.add_subparsers(dest="action", metavar="ACTION")
+
+    # hw-accel install
+    hw_install = hw_sub.add_parser(
+        "install",
+        help="auto-detect GPU and install the GStreamer HW decode drop-in",
+    )
+    hw_install.add_argument(
+        "--force-gpu",
+        metavar="TYPE",
+        default=None,
+        choices=["nvidia", "amd", "intel"],
+        help="override GPU auto-detection: nvidia | amd | intel",
+    )
+    hw_install.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="print what would be written without making changes",
+    )
+    hw_install.set_defaults(func=_hw_accel_install)
+
+    # hw-accel uninstall
+    hw_uninstall = hw_sub.add_parser(
+        "uninstall",
+        help="remove the GStreamer HW decode drop-in",
+    )
+    hw_uninstall.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="print what would be removed without making changes",
+    )
+    hw_uninstall.set_defaults(func=_hw_accel_uninstall)
+
+    # hw-accel status
+    hw_status = hw_sub.add_parser(
+        "status",
+        help="show detected hardware and current drop-in state",
+    )
+    hw_status.set_defaults(func=_hw_accel_status)
+
+    return parser
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ENTRY POINT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    _banner()
+
+    # Show resolved environment summary at the start of every invocation so
+    # operators always know which paths are being used.
+    mode_tag = (
+        f"{_BOLD_RED}[SYSTEM]{_RESET}" if SYSTEM_MODE
+        else f"{_BOLD_GREEN}[LOCAL DEV]{_RESET}"
+    )
+    print(f"  Mode:        {mode_tag}")
+    print(f"  Theme root:  {_DIM}{THEME_ROOT}{_RESET}")
+    print(f"  Settings:    {_DIM}{SETTINGS_JSON}{_RESET}")
+    print()
+
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+
+    # Dispatch to subcommand; every subparser sets args.func
+    if not hasattr(args, "func"):
+        # The user typed a top-level subcommand but no action under it
+        # (e.g. 'sddm-aurora-ctl playlist' with no 'create' or 'order').
+        # Print the relevant sub-help.
+        parser.parse_args([args.command, "--help"])
+        sys.exit(0)
+
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        print()
+        _warn("Interrupted by user.")
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

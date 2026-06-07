@@ -1,0 +1,26 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local user configurations and settings
+theme.conf.user
+settings.json
+*.tmp
+*.bak
+*.bak_*
+
+# IDEs and editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*~
+.DS_Store
+
+# Media files: ignore other video files, only track the default Background.mp4
+playlists/*.mp4
+!playlists/Background.mp4

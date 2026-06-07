@@ -1,16 +1,16 @@
 [SddmGreeterTheme]
-Name=Aerial HD Video
-Description=Aerial HD Video Stream
-Author=Fabio Almeida
-Copyright=(c) 2016, Fabio Almeida
-License=CC-BY-SA
+Name=aurora-greeter
+Description=Cinematic video and image slideshow login theme with adaptive performance
+Author=Biryukov Nikita (GitHub: @execorn)
+QtVersion=6
+Copyright=(c) 2026 Biryukov Nikita
+License=CC-BY-SA-4.0 / MIT
 Type=sddm-theme
-Version=0.1
-Website=https://github.com/3ximus/aerial-sddm-theme
+Version=1.0.0
+Website=https://github.com/execorn/aurora-greeter
 Screenshot=screens/screenshot.png
 MainScript=Main.qml
 ConfigFile=theme.conf
-Email=fabio_r11@hotmail.com
-Theme-Id=aerial-sddm
+Email=
+Theme-Id=aurora-greeter
 Theme-API=2.0
-
