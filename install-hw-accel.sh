@@ -342,7 +342,7 @@ probe_hw_decode_elements() {
 #
 #  QML_XHR_ALLOW_FILE_READ=1
 #    Allows Qt Quick's XMLHttpRequest to read file:// URLs.  Required by
-#    the theme's JSON persistence layer to load settings.json on startup.
+#    the theme's persistence layer to load settings.conf on startup.
 # ─────────────────────────────────────────────────────────────────────────────
 
 generate_dropin() {
@@ -400,7 +400,7 @@ ${gst_gl_api_line}
 Environment=GST_DEBUG=0
 
 # ── Qt XHR file access ─────────────────────────────────────────────────────
-# Required by the theme's JSON persistence layer (settings.json read/write).
+# Required by the theme's persistence layer (settings.conf read).
 Environment=QML_XHR_ALLOW_FILE_READ=1
 DROPIN
 }

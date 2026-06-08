@@ -13,7 +13,7 @@
 #      All writes target the local directory; sudo is never invoked.
 #    • System mode       — script installed to /usr/bin/sddm-aurora-ctl
 #      Writes target /usr/share/sddm/themes/aurora-greeter/ and
-#      /var/lib/sddm/.config/AuroraGreeter/settings.json.
+#      /var/lib/sddm/.config/AuroraGreeter/settings.conf.
 #      Write operations that need elevated privileges re-exec via sudo.
 #
 #  Subcommands:
@@ -110,9 +110,9 @@ def _heading(title: str) -> None:
 #         THEME_ROOT  = directory that contains this file
 #         SYSTEM_MODE = False  → no elevation
 #
-#  JSON settings file:
-#    • Prefer  /var/lib/sddm/.config/AuroraGreeter/settings.json
-#    • Fall back to {THEME_ROOT}/settings.json when /var/lib/ is not writable
+#  Settings file:
+#    • Prefer  /var/lib/sddm/.config/AuroraGreeter/settings.conf
+#    • Fall back to {THEME_ROOT}/settings.conf when /var/lib/ is not writable
 #      (common during local, non-root development).
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -127,7 +127,7 @@ _SYSTEM_BIN_PREFIXES = (
 )
 
 _SYSTEM_THEME_ROOT = Path("/usr/share/sddm/themes/aurora-greeter")
-_SYSTEM_SETTINGS = Path("/var/lib/sddm/.config/AuroraGreeter/settings.json")
+_SYSTEM_SETTINGS = Path("/var/lib/sddm/.config/AuroraGreeter/settings.conf")
 
 
 def _resolve_paths() -> tuple[Path, Path, Path, Path, bool]:
@@ -135,7 +135,7 @@ def _resolve_paths() -> tuple[Path, Path, Path, Path, bool]:
     Resolve all runtime paths.
 
     Returns:
-        (THEME_ROOT, PLAYLISTS_DIR, USER_CONF, SETTINGS_JSON, SYSTEM_MODE)
+        (THEME_ROOT, PLAYLISTS_DIR, USER_CONF, SETTINGS_CONF, SYSTEM_MODE)
     """
     script_real = Path(os.path.realpath(__file__))
     script_dir = script_real.parent
@@ -154,21 +154,21 @@ def _resolve_paths() -> tuple[Path, Path, Path, Path, bool]:
     playlists_dir = theme_root / "playlists"
     user_conf = theme_root / "theme.conf.user"
 
-    # Choose settings.json path
+    # Choose settings.conf path
     if _SYSTEM_SETTINGS.parent.exists():
         # /var/lib/sddm/.config/AuroraGreeter exists (or can be created)
-        settings_json = _SYSTEM_SETTINGS
+        settings_conf = _SYSTEM_SETTINGS
     elif system_mode:
         # System mode but /var/lib/sddm not yet created — will be created later
-        settings_json = _SYSTEM_SETTINGS
+        settings_conf = _SYSTEM_SETTINGS
     else:
-        # Local dev: fall back gracefully to a local settings.json
-        settings_json = theme_root / "settings.json"
+        # Local dev: fall back gracefully to a local settings.conf
+        settings_conf = theme_root / "settings.conf"
 
-    return theme_root, playlists_dir, user_conf, settings_json, system_mode
+    return theme_root, playlists_dir, user_conf, settings_conf, system_mode
 
 
-THEME_ROOT, PLAYLISTS_DIR, USER_CONF, SETTINGS_JSON, SYSTEM_MODE = _resolve_paths()
+THEME_ROOT, PLAYLISTS_DIR, USER_CONF, SETTINGS_CONF, SYSTEM_MODE = _resolve_paths()
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  PRIVILEGE ELEVATION HELPERS
@@ -290,18 +290,33 @@ _SETTINGS_DEFAULTS: dict = {
 
 def _load_settings() -> dict:
     """
-    Load and return the settings.json dictionary.
+    Load and return the settings dictionary from the config file.
 
     Missing keys are filled in from ``_SETTINGS_DEFAULTS``.
     An absent or unparsable file returns the defaults without error.
     """
     data: dict = dict(_SETTINGS_DEFAULTS)
-    if SETTINGS_JSON.exists():
+    if SETTINGS_CONF.exists():
         try:
-            raw = json.loads(SETTINGS_JSON.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                data.update(raw)
-                # Migration fallback: if useDayNightSchedule is not in settings.json
+            cp = configparser.ConfigParser(strict=False, interpolation=None)
+            cp.optionxform = str
+            cp.read(SETTINGS_CONF, encoding="utf-8")
+            if "General" in cp:
+                raw = dict(cp["General"])
+                for key, val in raw.items():
+                    if key in _SETTINGS_DEFAULTS:
+                        default_val = _SETTINGS_DEFAULTS[key]
+                        if isinstance(default_val, bool):
+                            data[key] = val.lower() in ("true", "yes", "1")
+                        elif isinstance(default_val, int):
+                            data[key] = int(val)
+                        elif isinstance(default_val, float):
+                            data[key] = float(val)
+                        else:
+                            data[key] = val
+                    else:
+                        data[key] = val
+                # Migration fallback: if useDayNightSchedule is not in settings file
                 # but a custom activePlaylist exists, default to False.
                 if "useDayNightSchedule" not in raw:
                     has_custom = (
@@ -309,23 +324,36 @@ def _load_settings() -> dict:
                         raw["activePlaylist"] != "playlists/Background.mp4"
                     )
                     data["useDayNightSchedule"] = not has_custom
-        except (json.JSONDecodeError, OSError) as exc:
-            _warn(f"Could not parse {SETTINGS_JSON}: {exc}  (using defaults)")
+        except Exception as exc:
+            _warn(f"Could not parse {SETTINGS_CONF}: {exc}  (using defaults)")
     return data
 
 
 def _save_settings(data: dict) -> None:
     """
-    Persist the settings dictionary to SETTINGS_JSON.
+    Persist the settings dictionary to SETTINGS_CONF.
 
     Writes are atomic and preserve all existing keys (a merge, not replace).
     """
     _ensure_elevated()
     existing = _load_settings()
     existing.update(data)
-    _atomic_write(SETTINGS_JSON, json.dumps(existing, indent=2) + "\n")
-    _set_perms_644(SETTINGS_JSON)
-    _ok(f"Settings written → {SETTINGS_JSON}")
+    
+    cp = configparser.ConfigParser(strict=False, interpolation=None)
+    cp.optionxform = str
+    cp["General"] = {}
+    for key, val in existing.items():
+        if isinstance(val, bool):
+            cp["General"][key] = "true" if val else "false"
+        else:
+            cp["General"][key] = str(val)
+            
+    import io
+    out = io.StringIO()
+    cp.write(out)
+    _atomic_write(SETTINGS_CONF, out.getvalue())
+    _set_perms_644(SETTINGS_CONF)
+    _ok(f"Settings written → {SETTINGS_CONF}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -898,7 +926,7 @@ def _wallpaper_set(args: argparse.Namespace) -> None:
          set 644 permissions, and record the theme-relative path.
       3. For URLs: write the URL directly to activePlaylist (the QML
          engine passes URLs straight to MediaPlayer.source).
-      4. Persist the new activePlaylist value to settings.json.
+      4. Persist the new activePlaylist value to settings.conf.
     """
     _heading("wallpaper set")
     _ensure_elevated()
@@ -982,7 +1010,7 @@ def _wallpaper_set(args: argparse.Namespace) -> None:
     else:
         _die(f"Unhandled media kind: {kind}")  # Should never happen
 
-    # ── Persist to settings.json ───────────────────────────────────────────────
+    # ── Persist to settings.conf ───────────────────────────────────────────────
     _save_settings({"activePlaylist": active_playlist})
     _ok(f"activePlaylist → \"{active_playlist}\"")
     _section()
@@ -1035,10 +1063,10 @@ def _scheduler_set_time(args: argparse.Namespace) -> None:
 
 def _config_set_theme(args: argparse.Namespace) -> None:
     """
-    Update one or more aesthetic parameters in settings.json.
+    Update one or more aesthetic parameters in settings.conf.
 
     Each flag is optional; only specified flags are written.  Unspecified
-    values retain their current values in settings.json.
+    values retain their current values in settings.conf.
     """
     _heading("config set-theme")
 
@@ -1057,7 +1085,7 @@ def _config_set_theme(args: argparse.Namespace) -> None:
 
     if args.radius is not None:
         radius = _validate_radius(args.radius)
-        # borderRadius lives in theme.conf / theme.conf.user (not settings.json)
+        # borderRadius lives in theme.conf / theme.conf.user (not settings.conf)
         # We write it to user conf so the QML engine picks it up.
         _info(f"borderRadius  → {radius}px  (written to theme.conf.user)")
 
@@ -1132,7 +1160,7 @@ def _config_set_theme(args: argparse.Namespace) -> None:
 
     _ensure_elevated()
 
-    # ── Write settings.json ───────────────────────────────────────────────────
+    # ── Write settings.conf ───────────────────────────────────────────────────
     if updates:
         _save_settings(updates)
 
@@ -1259,7 +1287,7 @@ def _status(args: argparse.Namespace) -> None:
         ("THEME_ROOT",    THEME_ROOT),
         ("PLAYLISTS_DIR", PLAYLISTS_DIR),
         ("USER_CONF",     USER_CONF),
-        ("SETTINGS_JSON", SETTINGS_JSON),
+        ("SETTINGS_CONF", SETTINGS_CONF),
     ]
     print(f"  {_BOLD_CYAN}Resolved paths:{_RESET}")
     for label, path in rows:
@@ -1270,8 +1298,8 @@ def _status(args: argparse.Namespace) -> None:
         print(f"    {_DIM}{label:<16}{_RESET}  {path}  [{exists_tag}]")
     print()
 
-    # Current settings.json
-    print(f"  {_BOLD_CYAN}Current settings.json:{_RESET}")
+    # Current settings.conf
+    print(f"  {_BOLD_CYAN}Current settings.conf:{_RESET}")
     settings = _load_settings()
     for key, val in settings.items():
         print(f"    {_DIM}{key:<26}{_RESET}  {_BOLD}{val}{_RESET}")
@@ -1648,7 +1676,7 @@ def main() -> None:
     )
     print(f"  Mode:        {mode_tag}")
     print(f"  Theme root:  {_DIM}{THEME_ROOT}{_RESET}")
-    print(f"  Settings:    {_DIM}{SETTINGS_JSON}{_RESET}")
+    print(f"  Settings:    {_DIM}{SETTINGS_CONF}{_RESET}")
     print()
 
     parser = _build_parser()

@@ -8,10 +8,15 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtMultimedia 6.0
 import SddmComponents 2.0
+import Qt.labs.settings 1.0
 import "components"
 
 Item {
     id: root
+
+    // Unique ID for this screen instance
+    readonly property string screenId: "screen_" + (typeof primaryScreen !== "undefined" && primaryScreen ? "PRIMARY" : "AUX") + "_" + Math.random().toString(36).substr(2, 5) + "_" + Screen.width + "x" + Screen.height
+    readonly property bool isPrimary: typeof primaryScreen !== "undefined" && primaryScreen
 
     // ── Per-monitor geometry ─────────────────────────────────────────────
     width:  Screen.width
@@ -28,8 +33,8 @@ Item {
     // ─────────────────────────────────────────────────────────────────────
     //  PERSISTENT SETTINGS — pure QML/JS, no QtCore.Settings required
     //
-    //  Reads from / writes to a JSON file at:
-    //    /var/lib/sddm/.config/AuroraGreeter/settings.json
+    //  Reads from / writes to an INI file at:
+    //    /var/lib/sddm/.config/AuroraGreeter/settings.conf
     //
     //  The sddm system user must own that directory with write access.
     //  install.sh creates it with chown sddm:sddm + chmod 750.
@@ -39,9 +44,14 @@ Item {
     QtObject {
         id: persist
 
+        // Heuristic to detect system mode vs local dev
+        readonly property bool _isSystemMode: Qt.resolvedUrl(".").toString().startsWith("file:///usr/share/sddm/themes/")
+
         // ── Config file location ──────────────────────────────────────
-        readonly property string _configPath:
-            "file:///var/lib/sddm/.config/AuroraGreeter/settings.json"
+        property string _configPath: _isSystemMode
+            ? "file:///var/lib/sddm/.config/AuroraGreeter/settings.conf"
+            : Qt.resolvedUrl("settings.conf").toString()
+        property string _configPathRaw: _configPath.replace(/^file:\/\//, "")
 
         // ── Live properties ───────────────────────────────────────────
         property string activePlaylist:         "playlists/Background.mp4"
@@ -76,25 +86,54 @@ Item {
         // Indicator if the configuration file was loaded and parsed successfully from disk
         property bool _loaded: false
 
-        // ── load(): read JSON from disk, overwrite properties ─────────
+        // Simple INI file parser
+        function _parseIni(text) {
+            var lines = text.split("\n");
+            var data = {};
+            for (var i = 0; i < lines.length; i++) {
+                var line = lines[i].trim();
+                if (line.startsWith("[") || line === "" || line.startsWith("#") || line.startsWith(";")) {
+                    continue;
+                }
+                var parts = line.split("=");
+                if (parts.length >= 2) {
+                    var key = parts[0].trim();
+                    var val = parts.slice(1).join("=").trim();
+                    if (val === "true") val = true;
+                    else if (val === "false") val = false;
+                    else if (!isNaN(val) && val !== "") {
+                        if (val.indexOf(".") !== -1) val = parseFloat(val);
+                        else val = parseInt(val, 10);
+                    }
+                    data[key] = val;
+                }
+            }
+            return data;
+        }
+
+        // ── load(): read INI from disk, overwrite properties ──────────
         //  Called once from Component.onCompleted.
-        //  Requires QML_XHR_ALLOW_FILE_READ=1 in the sddm.service environment
-        //  (set by install.sh's systemd drop-in).
-        //  Silently falls through to defaults on any read error or when
-        //  running in test mode where file XHR is blocked.
         function load() {
             var xhr = new XMLHttpRequest()
             xhr.open("GET", _configPath, false)
             try {
                 xhr.send()
             } catch(e) {
-                // Expected in test mode (QML_XHR_ALLOW_FILE_READ not set).
-                return
+                // Try local fallback (dev/test-mode)
+                _configPath = _isSystemMode
+                    ? "file:///var/lib/sddm/.config/AuroraGreeter/settings.conf"
+                    : Qt.resolvedUrl("settings.conf").toString()
+                xhr.open("GET", _configPath, false)
+                try {
+                    xhr.send()
+                } catch(e2) {
+                    return
+                }
             }
             if (xhr.status !== 0 && xhr.status !== 200) return
             if (!xhr.responseText || xhr.responseText.trim() === "") return
             try {
-                var data = JSON.parse(xhr.responseText)
+                var data = _parseIni(xhr.responseText)
                 if (typeof data.activePlaylist         === "string") activePlaylist         = data.activePlaylist
                 if (typeof data.activeMultiMonitorMode === "string") activeMultiMonitorMode = data.activeMultiMonitorMode
                 if (typeof data.clockFormat            === "string") clockFormat            = data.clockFormat
@@ -115,35 +154,42 @@ Item {
 
                 _loaded = true
             } catch(e) {
-                console.warn("[AuroraGreeter] Settings JSON parse error:", e)
+                console.warn("[AuroraGreeter] Settings INI parse error:", e)
             }
         }
 
         // ── sync(): write current property values back to disk ────────
         //  Called by ConfigDrawer whenever the user changes a setting.
         function sync() {
-            var data = {
-                activePlaylist:         activePlaylist,
-                activeMultiMonitorMode: activeMultiMonitorMode,
-                clockFormat:            clockFormat,
-                loginCardOpacity:       loginCardOpacity,
-                accentColor:            accentColor,
-                activeBackgroundType:   activeBackgroundType,
-                slideshowInterval:      slideshowInterval,
-                backgroundColor:        backgroundColor,
-                activeMediaSource:      activeMediaSource,
-                performanceMode:        performanceMode,
-                useDayNightSchedule:    useDayNightSchedule
-            }
-            var json = JSON.stringify(data, null, 2)
-            var xhr  = new XMLHttpRequest()
-            xhr.open("PUT", _configPath, false)
-            try {
-                xhr.send(json)
-            } catch(e) {
-                console.warn("[AuroraGreeter] Settings write error:", e)
-            }
+            settingsStore.activePlaylist = activePlaylist
+            settingsStore.activeMultiMonitorMode = activeMultiMonitorMode
+            settingsStore.clockFormat = clockFormat
+            settingsStore.loginCardOpacity = loginCardOpacity
+            settingsStore.accentColor = accentColor
+            settingsStore.activeBackgroundType = activeBackgroundType
+            settingsStore.slideshowInterval = slideshowInterval
+            settingsStore.backgroundColor = backgroundColor
+            settingsStore.activeMediaSource = activeMediaSource
+            settingsStore.performanceMode = performanceMode
+            settingsStore.useDayNightSchedule = useDayNightSchedule
+            settingsStore.sync()
         }
+    }
+
+    Settings {
+        id: settingsStore
+        fileName: persist._configPathRaw
+        property string activePlaylist
+        property string activeMultiMonitorMode
+        property string clockFormat
+        property real   loginCardOpacity
+        property string accentColor
+        property string activeBackgroundType
+        property int    slideshowInterval
+        property string backgroundColor
+        property string activeMediaSource
+        property string performanceMode
+        property bool   useDayNightSchedule
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -1637,86 +1683,92 @@ Item {
                     "| perf:", root.performanceMode,
                     "| effective:", root._isLowPerf ? "low (2K)" : "high")
     }
-
     // ─────────────────────────────────────────────────────────────────────
-    //  MULTI-SCREEN SETTINGS SYNC                                      [v4]
+    //  MULTI-SCREEN SETTINGS SYNC                                      [v6]
     //
     //  Problem: Each monitor runs its own Main.qml instance sharing the
-    //  same QML engine but with separate QtObject instances.  When the
-    //  user changes a setting via ConfigDrawer on monitor A, persist.sync()
-    //  writes the JSON file but the persist objects on monitors B and C
-    //  have no knowledge of the change.
+    //  same QML engine but with separate QtObject instances. When the
+    //  user changes a setting via ConfigDrawer on monitor A, it needs to
+    //  propagate to monitors B and C immediately.
+    //
+    //  Solution: A shared QML Singleton (ThemeState) in-memory channel.
+    //  The primary monitor binds ThemeState properties to its local settings,
+    //  and auxiliary monitors bind their local settings to ThemeState properties.
+    //  This triggers real-time updates and media pipeline reloads instantly
+    //  without relying on file polling or I/O access.
+    // ─────────────────────────────────────────────────────────────────────
+
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  MULTI-SCREEN SETTINGS SYNC                                      [v6]
+    //
+    //  Problem: Each monitor runs its own Main.qml instance under separate
+    //  QQmlEngine instances. No in-memory state or singletons are shared.
     //
     //  Solution: A lightweight polling Timer on every NON-PRIMARY screen
-    //  re-reads the JSON file every 400 ms and, if it detects that
-    //  activeBackgroundType, activePlaylist, or performanceMode changed,
-    //  re-triggers _reloadBackdrop so the pipeline on that screen catches
-    //  up immediately.
-    //
-    //  The primary screen is intentionally excluded from polling because
-    //  it IS the source of truth — it writes changes and re-inits itself
-    //  inline via _reloadBackdrop from the ConfigDrawer tap handler.
-    //
-    //  Read cost: ~one small JSON file read per 400 ms per auxiliary
-    //  screen.  In practice this is imperceptible (< 0.1 ms/read for a
-    //  local file).
+    //  re-reads the settings JSON file (with fallback path resolution)
+    //  every 400 ms and, if it detects changes, reloads its local pipeline.
     // ─────────────────────────────────────────────────────────────────────
+    property bool _isReady: false
+
     Timer {
         id:       settingsSyncTimer
         interval: 400
         repeat:   true
-        running:  !primaryScreen   // only non-primary screens need to poll
+        running:  !isPrimary   // only non-primary screens need to poll
 
         onTriggered: {
             var xhr = new XMLHttpRequest()
             xhr.open("GET", persist._configPath, false)
-            try { xhr.send() } catch(e) { return }
+            try { xhr.send() } catch(e) {
+                return
+            }
             if (xhr.status !== 0 && xhr.status !== 200) return
             if (!xhr.responseText || xhr.responseText.trim() === "") return
 
-            var data
-            try { data = JSON.parse(xhr.responseText) } catch(e) { return }
+            var data = persist._parseIni(xhr.responseText)
 
-            var bgChanged  = (typeof data.activeBackgroundType === "string" &&
-                              data.activeBackgroundType !== persist.activeBackgroundType)
-            var plChanged  = (typeof data.activePlaylist      === "string" &&
-                              data.activePlaylist      !== persist.activePlaylist)
-            var pmChanged  = (typeof data.performanceMode     === "string" &&
-                              data.performanceMode     !== persist.performanceMode)
-            var mmChanged  = (typeof data.activeMultiMonitorMode === "string" &&
-                              data.activeMultiMonitorMode !== persist.activeMultiMonitorMode)
-            var schedChanged = (typeof data.useDayNightSchedule === "boolean" &&
-                                data.useDayNightSchedule !== persist.useDayNightSchedule)
+            // ── Detect every media-relevant change ────────────────────────
+            var bgChanged    = (typeof data.activeBackgroundType  === "string"  &&
+                                data.activeBackgroundType  !== persist.activeBackgroundType)
+            var plChanged    = (typeof data.activePlaylist        === "string"  &&
+                                data.activePlaylist        !== persist.activePlaylist)
+            var msChanged    = (typeof data.activeMediaSource     === "string"  &&
+                                data.activeMediaSource     !== persist.activeMediaSource)
+            var pmChanged    = (typeof data.performanceMode       === "string"  &&
+                                data.performanceMode       !== persist.performanceMode)
+            var mmChanged    = (typeof data.activeMultiMonitorMode === "string" &&
+                                data.activeMultiMonitorMode !== persist.activeMultiMonitorMode)
+            var schedChanged = (typeof data.useDayNightSchedule   === "boolean" &&
+                                data.useDayNightSchedule   !== persist.useDayNightSchedule)
+            var colorChanged = (typeof data.backgroundColor       === "string"  &&
+                                data.backgroundColor       !== persist.backgroundColor)
 
-            if (!bgChanged && !plChanged && !pmChanged && !mmChanged && !schedChanged) return
+            // Early-exit when nothing we care about changed
+            if (!bgChanged && !plChanged && !msChanged && !pmChanged &&
+                !mmChanged && !schedChanged && !colorChanged) return
 
-            // Sync all changed fields silently
-            if (typeof data.activeBackgroundType   === "string") persist.activeBackgroundType   = data.activeBackgroundType
-            if (typeof data.activePlaylist         === "string") persist.activePlaylist         = data.activePlaylist
-            if (typeof data.performanceMode        === "string") persist.performanceMode        = data.performanceMode
-            if (typeof data.activeMultiMonitorMode === "string") persist.activeMultiMonitorMode = data.activeMultiMonitorMode
-            if (typeof data.useDayNightSchedule    === "boolean") persist.useDayNightSchedule   = data.useDayNightSchedule
-            // Also sync visual-only settings so they stay consistent
-            if (typeof data.accentColor            === "string") persist.accentColor            = data.accentColor
-            if (typeof data.loginCardOpacity       === "number") persist.loginCardOpacity       = data.loginCardOpacity
-            if (typeof data.backgroundColor        === "string") persist.backgroundColor        = data.backgroundColor
-            if (typeof data.slideshowInterval      === "number") persist.slideshowInterval      = data.slideshowInterval
+            // ── Sync ALL changed fields into our local persist ─────────────
+            if (typeof data.activeBackgroundType   === "string")  persist.activeBackgroundType   = data.activeBackgroundType
+            if (typeof data.activePlaylist         === "string")  persist.activePlaylist         = data.activePlaylist
+            if (typeof data.activeMediaSource      === "string")  persist.activeMediaSource      = data.activeMediaSource
+            if (typeof data.performanceMode        === "string")  persist.performanceMode        = data.performanceMode
+            if (typeof data.activeMultiMonitorMode === "string")  persist.activeMultiMonitorMode = data.activeMultiMonitorMode
+            if (typeof data.useDayNightSchedule    === "boolean") persist.useDayNightSchedule    = data.useDayNightSchedule
+            // Visual / UI settings
+            if (typeof data.accentColor            === "string")  persist.accentColor            = data.accentColor
+            if (typeof data.loginCardOpacity       === "number")  persist.loginCardOpacity       = data.loginCardOpacity
+            if (typeof data.backgroundColor        === "string")  persist.backgroundColor        = data.backgroundColor
+            if (typeof data.slideshowInterval      === "number")  persist.slideshowInterval      = data.slideshowInterval
 
-            console.log("[AuroraGreeter] [screen", Screen.width + "x" + Screen.height + "]",
-                        "Settings changed — syncing properties:",
-                        persist.activeBackgroundType, "/",
-                        persist.activeBackgroundType === "video"
-                            ? persist.activePlaylist : persist.activeMediaSource,
-                        "| monitorMode:", persist.activeMultiMonitorMode)
-
-            // Only restart the media pipeline when media-related settings changed.
-            // Monitor-mode changes propagate automatically via QML bindings
-            // (showBackground, showUI) without needing a pipeline reload.
-            if (bgChanged || plChanged || pmChanged || schedChanged) {
+            // ── Restart the media pipeline for any media-relevant change ───
+            if (bgChanged || plChanged || msChanged || pmChanged || schedChanged || colorChanged) {
                 var syncSrc
                 if (persist.useDayNightSchedule) {
                     var scheduled = _resolveScheduledMedia()
-                    syncSrc = (persist.activeBackgroundType === "video") ? scheduled.video : scheduled.image
+                    syncSrc = (persist.activeBackgroundType === "video")
+                              ? scheduled.video
+                              : scheduled.image
                 } else {
                     syncSrc = (persist.activeBackgroundType === "video")
                               ? persist.activePlaylist
@@ -1727,6 +1779,7 @@ Item {
             }
         }
     }
+
 
     // ─────────────────────────────────────────────────────────────────────
     //  DAY/NIGHT SCHEDULER HELPERS
@@ -1810,9 +1863,10 @@ Item {
         }
 
         _initPlayback(videoPath, imagePath)
+        _isReady = true
 
         // ── Autofocus — primary screen only ───────────────────────────
-        if (primaryScreen && config.autofocusInput === "true") {
+        if (isPrimary && config.autofocusInput === "true") {
             Qt.callLater(function() {
                 _revealUI()
                 _focusAppropriateInput()

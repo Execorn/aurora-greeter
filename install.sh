@@ -214,10 +214,10 @@ _section_done
 # ==============================================================================
 _step "4" "Creating persistent config store for the sddm user"
 
-# The theme's QML persistence layer (persist.load / persist.sync in Main.qml)
-# reads and writes a JSON settings file via XMLHttpRequest.  At runtime the
+# The theme's QML persistence layer (persist.load / settingsStore in Main.qml)
+# reads and writes an INI settings file.  At runtime the
 # sddm system user's home is /var/lib/sddm, so the full path becomes:
-#   /var/lib/sddm/.config/AuroraGreeter/settings.json
+#   /var/lib/sddm/.config/AuroraGreeter/settings.conf
 #
 # The directory must be:
 #   • owned by the sddm user/group
@@ -242,7 +242,7 @@ fi
 chmod 750 "${SDDM_CONFIG_HOME}"
 _ok "Permissions: 750 (sddm rw, group r, others none)"
 _ok "Persistent config directory: ${SDDM_CONFIG_HOME}"
-_info "ConfigDrawer will write to: ${SDDM_CONFIG_HOME}/settings.json"
+_info "ConfigDrawer will write to: ${SDDM_CONFIG_HOME}/settings.conf"
 _section_done
 
 # ==============================================================================
@@ -270,9 +270,8 @@ _step "5" "Writing SDDM theme + environment configuration"
 #
 # Variable rationale:
 #   QML_XHR_ALLOW_FILE_READ=1    — permit QML's XMLHttpRequest to read local
-#                                   .m3u playlists and settings.json
-#   QML_XHR_ALLOW_FILE_WRITE=1   — permit QML's XMLHttpRequest to write
-#                                   settings.json (persist.sync)
+#                                   .m3u playlists and settings.conf
+#   QML_XHR_ALLOW_FILE_WRITE=1   — legacy/compatibility setting for local writes
 #   QT_MEDIA_BACKEND=gstreamer   — force GStreamer; FFmpeg backend fails to
 #                                   initialise NvDec on Nvidia GPUs
 #   GST_AUDIOSINK=fakesink       — defense-in-depth: if any GStreamer element

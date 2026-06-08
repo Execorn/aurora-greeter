@@ -35,7 +35,7 @@
 | ⚙️ **Live Config Drawer** | Alt+S anywhere — change playlist, backdrop, color, clock, performance instantly |
 | 🛠️ **CLI companion** | `sddm-aurora-ctl` — scriptable control of every setting from terminal |
 | 🎮 **HW Acceleration** | One-command NVIDIA / AMD / Intel VA-API systemd drop-in installer |
-| 💾 **Persistent settings** | All choices survive reboots via `/var/lib/sddm/.config/AuroraGreeter/settings.json` |
+| 💾 **Persistent settings** | All choices survive reboots via `/var/lib/sddm/.config/AuroraGreeter/settings.conf` |
 | 🌙 **Day/Night playlists** | Automatic time-based playlist selection with configurable hours |
 | 🔤 **Fully themeable** | Clock style, font, accent color, opacity, border radius all configurable |
 
@@ -192,7 +192,7 @@ To maintain professional-grade stability and reliability on production display m
 
 ## 🎛️ CLI Reference — `sddm-aurora-ctl`
 
-The `sddm-aurora-ctl` script is your terminal interface to every setting. It operates on `/var/lib/sddm/.config/AuroraGreeter/settings.json` and theme configuration files.
+The `sddm-aurora-ctl` script is your terminal interface to every setting. It operates on `/var/lib/sddm/.config/AuroraGreeter/settings.conf` and theme configuration files.
 
 > [!NOTE]
 > - **Arch Linux (AUR) Users**: The script is globally symlinked. You can execute `sddm-aurora-ctl` directly from any directory (e.g., `sudo sddm-aurora-ctl --help`).
@@ -441,7 +441,7 @@ sudo sddm-aurora-ctl config set-theme --monitor-mode primary-only
 sudo sddm-aurora-ctl config set-theme --monitor-mode blank-auxiliary
 ```
 
-Settings changes made in the Config Drawer propagate to all monitors within ~400 ms via the polling sync timer.
+Settings changes made in the Config Drawer are natively serialized to the INI config file (`settings.conf`) using QML's `Qt.labs.settings` component on the primary monitor. All auxiliary monitors (which run in isolated QML engines) poll this file every 400 ms via `XMLHttpRequest` GET and a lightweight custom INI parser, reloading their media pipelines in real-time when changes are detected.
 
 ---
 
