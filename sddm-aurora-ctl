@@ -278,7 +278,7 @@ def _atomic_write(path: Path, content: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  JSON SETTINGS  (settings.json)
+#  INI SETTINGS  (settings.conf)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Default property values — mirrors the QML defaults in Main.qml

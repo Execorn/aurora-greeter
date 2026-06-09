@@ -313,51 +313,27 @@ Aurora Greeter supports custom `.m3u` playlists and directories for both video l
 
 ### Example: Setting up a custom image slideshow from a directory
 
-If you have a directory of wallpapers (e.g., `/path/to/wallpapers`) and want to use it as a slideshow:
+If you have a local directory of wallpapers (e.g., `/path/to/wallpapers`) and want to use it as a slideshow:
 
-#### Option A: Set Active Wallpaper via CLI
+#### Option A: Set Active Slideshow via CLI
 ```bash
-# 1. Create a playlist of the images
-sudo sddm-aurora-ctl playlist create my_wallpapers /path/to/wallpapers
+# 1. Register the image directory (scans, copies, creates playlist, and catalogs it)
+sudo sddm-aurora-ctl catalogue add-image "My Wallpapers" /path/to/wallpapers
 
-# 2. Set the background type to slideshow
-sudo sddm-aurora-ctl config set-theme --bg-type slideshow
+# 2. Set the background type to slideshow and disable scheduler
+sudo sddm-aurora-ctl config set-theme --bg-type slideshow --schedule off
 
 # 3. Set the active wallpaper source to the new playlist
-sudo sddm-aurora-ctl wallpaper set playlists/my_wallpapers.m3u
+sudo sddm-aurora-ctl wallpaper set playlists/My_Wallpapers.m3u
 ```
 
-#### Option B: Register it in the Config Drawer GUI
-To make the slideshow select-able inside the GUI drawer:
-1. Generate the playlist file:
-   ```bash
-   sudo sddm-aurora-ctl playlist create my_wallpapers /path/to/wallpapers
-   ```
-2. Open the catalogue index file:
-   ```bash
-   sudo nano /usr/share/sddm/themes/aurora-greeter/playlists/index.json
-   ```
-3. Add your playlist to the `image` array:
-   ```json
-   {
-     "version": 1,
-     "video": [
-       ...
-     ],
-     "image": [
-       {
-         "label": "Default Image",
-         "path": "backgrounds/background.jpg",
-         "default": true
-       },
-       {
-         "label": "My Wallpapers Slideshow",
-         "path": "playlists/my_wallpapers.m3u"
-       }
-     ]
-   }
-   ```
-4. Now, open the Config Drawer (**Alt+S**), select **Slideshow** as the backdrop style, and choose **My Wallpapers Slideshow** from the list!
+#### Option B: Choose from the Config Drawer GUI
+```bash
+# 1. Register the image directory in the catalogue
+sudo sddm-aurora-ctl catalogue add-image "My Wallpapers" /path/to/wallpapers
+```
+2. Reboot or restart SDDM to reload the greeter.
+3. Open the Config Drawer (**Alt+S**), select **Slideshow** as the backdrop style, and choose **My Wallpapers** from the list!
 
 ---
 
