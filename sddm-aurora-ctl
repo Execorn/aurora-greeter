@@ -144,7 +144,7 @@ def _resolve_paths() -> tuple[Path, Path, Path, Path, bool]:
     system_mode = any(
         str(script_real).startswith(prefix)
         for prefix in _SYSTEM_BIN_PREFIXES
-    )
+    ) or str(script_real).startswith(str(_SYSTEM_THEME_ROOT))
 
     if system_mode:
         theme_root = _SYSTEM_THEME_ROOT
@@ -232,6 +232,12 @@ def _ensure_dir(path: Path) -> None:
     """Create a directory (and all parents) if it does not exist."""
     try:
         path.mkdir(parents=True, exist_ok=True)
+        # Ensure root-created directories in /var/lib/sddm/ are owned by sddm
+        if str(path).startswith("/var/lib/sddm"):
+            try:
+                shutil.chown(str(path), user="sddm", group="sddm")
+            except Exception:
+                pass
     except PermissionError:
         _die(f"Permission denied creating directory: {path}")
     except OSError as exc:
@@ -258,6 +264,12 @@ def _atomic_write(path: Path, content: str) -> None:
     try:
         tmp.write_text(content, encoding="utf-8")
         tmp.replace(path)
+        # Ensure files written to /var/lib/sddm/ are owned by sddm
+        if str(path).startswith("/var/lib/sddm"):
+            try:
+                shutil.chown(str(path), user="sddm", group="sddm")
+            except Exception:
+                pass
     except PermissionError:
         _die(f"Permission denied writing to {path}.\n"
              f"       Hint: run as root or check directory ownership.")
@@ -566,13 +578,36 @@ def _playlist_create(args: argparse.Namespace) -> None:
 
     _info(f"Found {len(found)} compatible file(s).")
 
+    # If in system mode and source is outside THEME_ROOT, copy files to make them readable by sddm
+    copy_dest = None
+    is_inside = False
+    try:
+        src.relative_to(THEME_ROOT)
+        is_inside = True
+    except ValueError:
+        pass
+
+    if SYSTEM_MODE and not is_inside:
+        copy_dest = THEME_ROOT / "backgrounds" / safe_name
+        _ensure_dir(copy_dest)
+        _info(f"System mode: Copying media files to {copy_dest} so the 'sddm' user can access them.")
+
     # ── Build .m3u content ────────────────────────────────────────────────────
     lines: list[str] = ["#EXTM3U", ""]
 
     for f in found:
         title = f.stem
         lines.append(f"#EXTINF:-1,{title}")
-        lines.append(str(f))
+        if copy_dest:
+            rel_f = f.relative_to(src)
+            dest_f = copy_dest / rel_f
+            _ensure_dir(dest_f.parent)
+            if f != dest_f:
+                shutil.copy2(str(f), str(dest_f))
+                _set_perms_644(dest_f)
+            lines.append(str(dest_f))
+        else:
+            lines.append(str(f))
         lines.append("")
 
     content = "\n".join(lines)
@@ -744,20 +779,17 @@ def _catalogue_list(args: argparse.Namespace) -> None:
 
 def _catalogue_add_video(args: argparse.Namespace) -> None:
     """
-    Scan *folder* for video files, create a named .m3u playlist in
+    Scan *folder* (or a single file) for video files, create a named .m3u playlist in
     {THEME_ROOT}/playlists/, and register it in index.json.
-
-    The generated playlist uses absolute paths so GStreamer can open the
-    files regardless of where SDDM is launched from.
     """
     _heading("catalogue add-video")
     _ensure_elevated()
 
     label = args.label.strip()
-    folder = Path(args.folder).expanduser().resolve()
+    src = Path(args.folder).expanduser().resolve()
 
-    if not folder.exists() or not folder.is_dir():
-        _die(f"Folder does not exist or is not a directory: {folder}")
+    if not src.exists():
+        _die(f"Path does not exist: {src}")
 
     if not label:
         _die("Label must not be empty.")
@@ -768,36 +800,70 @@ def _catalogue_add_video(args: argparse.Namespace) -> None:
     if not safe_name:
         _die("Label resolves to an empty filename after sanitisation.")
 
-    _info(f"Label:   {label}")
-    _info(f"Folder:  {folder}")
+    _info(f"Label:  {label}")
+    _info(f"Source: {src}")
 
-    # Scan for video files
-    found: list[Path] = sorted(
-        f for f in folder.rglob("*")
-        if f.is_file() and f.suffix.lower() in _VIDEO_EXTS
-    )
-    if not found:
-        _die(
-            f"No video files found in: {folder}\n"
-            f"       Supported: {', '.join(sorted(_VIDEO_EXTS))}"
+    # Determine files to copy
+    found: list[Path] = []
+    if src.is_file():
+        if src.suffix.lower() not in _VIDEO_EXTS:
+            _die(f"Unsupported video extension: {src.suffix}")
+        found.append(src)
+    else:
+        # Scan for video files
+        found = sorted(
+            f for f in src.rglob("*")
+            if f.is_file() and f.suffix.lower() in _VIDEO_EXTS
         )
-    _info(f"Found {len(found)} video file(s).")
+        if not found:
+            _die(
+                f"No video files found in: {src}\n"
+                f"       Supported: {', '.join(sorted(_VIDEO_EXTS))}"
+            )
+        _info(f"Found {len(found)} video file(s).")
+
+    # If system mode and source is outside THEME_ROOT, copy files to grounds
+    copy_dest = None
+    is_inside = False
+    try:
+        src.relative_to(THEME_ROOT)
+        is_inside = True
+    except ValueError:
+        pass
+
+    if SYSTEM_MODE and not is_inside:
+        copy_dest = THEME_ROOT / "backgrounds" / safe_name
+        _ensure_dir(copy_dest)
+        _info(f"System mode: Copying media files to {copy_dest} so the 'sddm' user can access them.")
 
     # Write .m3u playlist
     _ensure_dir(PLAYLISTS_DIR)
     out_path = PLAYLISTS_DIR / f"{safe_name}.m3u"
     lines: list[str] = ["#EXTM3U", ""]
+    
     for f in found:
-        lines.append(f"#EXTINF:-1,{f.stem}")
-        lines.append(str(f))
+        title = f.stem
+        lines.append(f"#EXTINF:-1,{title}")
+        if copy_dest:
+            if src.is_file():
+                dest_f = copy_dest / f.name
+            else:
+                rel_f = f.relative_to(src)
+                dest_f = copy_dest / rel_f
+            _ensure_dir(dest_f.parent)
+            if f != dest_f:
+                shutil.copy2(str(f), str(dest_f))
+                _set_perms_644(dest_f)
+            lines.append(str(dest_f))
+        else:
+            lines.append(str(f))
         lines.append("")
+        
     _atomic_write(out_path, "\n".join(lines))
     _set_perms_644(out_path)
     _ok(f"Playlist written: {out_path}  ({len(found)} entries)")
 
     # Register in index.json
-    # Store a theme-relative path so the QML engine resolves it against
-    # the theme root regardless of where SDDM is installed.
     rel_path = "playlists/" + out_path.name
     data = _load_index()
 
@@ -820,8 +886,8 @@ def _catalogue_add_video(args: argparse.Namespace) -> None:
 
 def _catalogue_add_image(args: argparse.Namespace) -> None:
     """
-    Copy an image file into {THEME_ROOT}/backgrounds/ and register it in
-    index.json so the ConfigDrawer can offer it as an image/slideshow source.
+    Copy an image file into {THEME_ROOT}/backgrounds/ (or a folder of images as a slideshow)
+    and register it in index.json so the ConfigDrawer can offer it as an image/slideshow source.
     """
     _heading("catalogue add-image")
     _ensure_elevated()
@@ -831,30 +897,92 @@ def _catalogue_add_image(args: argparse.Namespace) -> None:
 
     if not label:
         _die("Label must not be empty.")
-    if not src.exists() or not src.is_file():
-        _die(f"Image file does not exist: {src}")
-    if src.suffix.lower() not in _IMAGE_EXTS:
-        _die(
-            f"Unsupported image extension: '{src.suffix}'\n"
-            f"       Supported: {', '.join(sorted(_IMAGE_EXTS))}"
-        )
+    if not src.exists():
+        _die(f"Path does not exist: {src}")
+
+    # Sanitise label into a safe filename
+    safe_name = re.sub(r"[^A-Za-z0-9_\-.]", "_", label)
+    safe_name = re.sub(r"\.{2,}", ".", safe_name).strip("_-")
+    if not safe_name:
+        _die("Label resolves to an empty filename after sanitisation.")
 
     _info(f"Label:  {label}")
     _info(f"Source: {src}")
 
-    # Copy into backgrounds/
-    bg_dir = THEME_ROOT / "backgrounds"
-    _ensure_dir(bg_dir)
-    dest = bg_dir / src.name
-    if src != dest:
-        _info(f"Copying → {dest}")
-        import shutil as _shutil
-        _shutil.copy2(str(src), str(dest))
-        _set_perms_644(dest)
-    _ok(f"Image installed: {dest}")
+    # Determine if single image or directory of images
+    if src.is_file():
+        if src.suffix.lower() not in _IMAGE_EXTS:
+            _die(
+                f"Unsupported image extension: '{src.suffix}'\n"
+                f"       Supported: {', '.join(sorted(_IMAGE_EXTS))}"
+            )
+        
+        # Copy into backgrounds/
+        bg_dir = THEME_ROOT / "backgrounds"
+        _ensure_dir(bg_dir)
+        dest = bg_dir / src.name
+        if src != dest:
+            _info(f"Copying → {dest}")
+            shutil.copy2(str(src), str(dest))
+            _set_perms_644(dest)
+        _ok(f"Image installed: {dest}")
+        
+        rel_path = "backgrounds/" + dest.name
+
+    else:
+        # Scan for image files
+        found = sorted(
+            f for f in src.rglob("*")
+            if f.is_file() and f.suffix.lower() in _IMAGE_EXTS
+        )
+        if not found:
+            _die(
+                f"No image files found in: {src}\n"
+                f"       Supported: {', '.join(sorted(_IMAGE_EXTS))}"
+            )
+        _info(f"Found {len(found)} image file(s).")
+        
+        # If system mode and source is outside THEME_ROOT, copy files to backgrounds
+        copy_dest = None
+        is_inside = False
+        try:
+            src.relative_to(THEME_ROOT)
+            is_inside = True
+        except ValueError:
+            pass
+
+        if SYSTEM_MODE and not is_inside:
+            copy_dest = THEME_ROOT / "backgrounds" / safe_name
+            _ensure_dir(copy_dest)
+            _info(f"System mode: Copying media files to {copy_dest} so the 'sddm' user can access them.")
+
+        # Write .m3u playlist
+        _ensure_dir(PLAYLISTS_DIR)
+        out_path = PLAYLISTS_DIR / f"{safe_name}.m3u"
+        lines: list[str] = ["#EXTM3U", ""]
+        
+        for f in found:
+            title = f.stem
+            lines.append(f"#EXTINF:-1,{title}")
+            if copy_dest:
+                rel_f = f.relative_to(src)
+                dest_f = copy_dest / rel_f
+                _ensure_dir(dest_f.parent)
+                if f != dest_f:
+                    shutil.copy2(str(f), str(dest_f))
+                    _set_perms_644(dest_f)
+                lines.append(str(dest_f))
+            else:
+                lines.append(str(f))
+            lines.append("")
+            
+        _atomic_write(out_path, "\n".join(lines))
+        _set_perms_644(out_path)
+        _ok(f"Playlist written: {out_path}  ({len(found)} entries)")
+        
+        rel_path = "playlists/" + out_path.name
 
     # Register in index.json
-    rel_path = "backgrounds/" + dest.name
     data = _load_index()
 
     existing_labels = {e.get("label", "") for e in data.get("image", [])}
@@ -870,7 +998,7 @@ def _catalogue_add_image(args: argparse.Namespace) -> None:
     _save_index(data)
     _ok(f"Registered in catalogue: \"{label}\" → {rel_path}")
     _section()
-    _info("Open the settings drawer (Alt+S) and switch to Image mode to see it.")
+    _info("Open the settings drawer (Alt+S) and switch to Image/Slideshow mode to see it.")
     print()
 
 
@@ -1011,8 +1139,13 @@ def _wallpaper_set(args: argparse.Namespace) -> None:
         _die(f"Unhandled media kind: {kind}")  # Should never happen
 
     # ── Persist to settings.conf ───────────────────────────────────────────────
-    _save_settings({"activePlaylist": active_playlist})
+    settings_to_save = {"activePlaylist": active_playlist}
+    if kind in ("image", "playlist"):
+        settings_to_save["activeMediaSource"] = active_playlist
+    _save_settings(settings_to_save)
     _ok(f"activePlaylist → \"{active_playlist}\"")
+    if "activeMediaSource" in settings_to_save:
+        _ok(f"activeMediaSource → \"{active_playlist}\"")
     _section()
     _info("Changes take effect at the next SDDM session.")
     print()
