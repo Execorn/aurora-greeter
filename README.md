@@ -2,14 +2,13 @@
 
 <br/>
 
-```
- ╔═══════════════════════════════════════════╗
-   ✦  A U R O R A  G R E E T E R  ✦      
-     Cinematic · Adaptive · Open Source    
- ╚═══════════════════════════════════════════╝
+```text
+╔════════════════════════════════════════════╗
+║      ✦  A U R O R A  G R E E T E R  ✦      ║
+║     Cinematic | Adaptive | Open Source     ║
+╚════════════════════════════════════════════╝
 ```
 
-# Aurora Greeter
 
 **A cinematic, hardware-adaptive SDDM login theme powered by cinematic video, intelligent performance scaling, and a fully-featured live configuration drawer.**
 
