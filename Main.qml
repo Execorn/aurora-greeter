@@ -509,9 +509,19 @@ Item {
                     // Normal; pipeline is buffering the new source.
                     break
 
+                case MediaPlayer.LoadedMedia:
+                    // Fires for local files when the first frame is decoded —
+                    // on many GStreamer backends BufferedMedia never follows for
+                    // local sources, so we must reveal here as well.
+                    console.log("[Aurora] Video loaded (LoadedMedia) — revealing surface")
+                    root._videoReloading = false
+                    videoSurface.opacity = 1.0
+                    break
+
                 case MediaPlayer.BufferedMedia:
                     // New track fully buffered — animate the surface back in.
-                    console.log("[Aurora] Video buffered — revealing surface")
+                    // Also fires for network streams after initial buffering.
+                    console.log("[Aurora] Video buffered (BufferedMedia) — revealing surface")
                     root._videoReloading = false
                     videoSurface.opacity = 1.0
                     break
@@ -897,7 +907,7 @@ Item {
                                 left:           passwordLabel.right
                                 leftMargin:     config.passwordLeftMargin
                                 right:          parent.right
-                                rightMargin:    loginUI.showLoginBtn ? 44 : 0
+                                rightMargin:    loginUI.showLoginBtn ? parent.height + 4 : 0
                                 verticalCenter: parent.verticalCenter
                             }
                             height:      parent.height
@@ -956,8 +966,8 @@ Item {
                             }
                         }
 
-                        // Login button (>)
-                        Button {
+                        // Login button — modern accent pill with arrow icon
+                        Rectangle {
                             id: loginButton
                             visible: loginUI.showLoginBtn
                             anchors {
@@ -965,22 +975,112 @@ Item {
                                 verticalCenter: parent.verticalCenter
                             }
                             height: parent.height
-                            width:  44
-                            text:          ">"
-                            font:          displayFont.name
-                            color:         "#393939"
-                            border.color:  "#00000000"
-                            disabledColor: "#dc322f"
-                            activeColor:   "#268bd2"
-                            pressedColor:  "#2aa198"
-                            textColor:     "white"
+                            width:  parent.height   // square → circle via radius
 
-                            onClicked: sddm.login(usernameInput.text,
-                                                  passwordInput.text,
-                                                  sessionCombo.index)
+                            radius: height / 2
+
+                            // ── Accent gradient fill ─────────────────────
+                            readonly property color _accent: root.accentColor
+                            readonly property bool _hovered: loginMa.containsMouse && enabled
+                            readonly property bool _pressed: loginMa.pressed       && enabled
+
+                            color: {
+                                if (!enabled) return Qt.rgba(0.86, 0.19, 0.18, 0.75)  // #dc322f disabled
+                                if (_pressed) return Qt.darker(_accent, 1.22)
+                                if (_hovered) return Qt.lighter(_accent, 1.15)
+                                return _accent
+                            }
+                            Behavior on color { ColorAnimation { duration: 160; easing.type: Easing.InOutQuad } }
+
+                            // ── Glow ring: matches accent, pulses on hover ───
+                            border.width: _hovered || _pressed ? 2 : 1
+                            border.color: Qt.rgba(_accent.r, _accent.g, _accent.b,
+                                                  _pressed ? 0.55 : _hovered ? 0.85 : 0.40)
+                            Behavior on border.color { ColorAnimation { duration: 180 } }
+                            Behavior on border.width { NumberAnimation { duration: 120 } }
+
+                            // ── Inner glow ring (soft accent halo) ───────────
+                            Rectangle {
+                                anchors { fill: parent; margins: 2 }
+                                radius: parent.radius
+                                color: "transparent"
+                                border.width: 2
+                                border.color: Qt.rgba(parent._accent.r,
+                                                      parent._accent.g,
+                                                      parent._accent.b,
+                                                      parent._hovered ? 0.28 : 0.10)
+                                Behavior on border.color { ColorAnimation { duration: 200 } }
+                            }
+
+                            // ── Top specular shimmer ──────────────────────────
+                            Rectangle {
+                                anchors { top: parent.top; left: parent.left; right: parent.right }
+                                height: parent.height * 0.45
+                                radius: parent.radius
+                                color: "transparent"
+                                // clipped gradient strip gives the "lit from above" look
+                                Rectangle {
+                                    anchors { top: parent.top; left: parent.left; right: parent.right }
+                                    height: 1
+                                    radius: parent.radius
+                                    color: Qt.rgba(1, 1, 1,
+                                                   loginButton._pressed ? 0.04
+                                                   : loginButton._hovered ? 0.22 : 0.12)
+                                    Behavior on color { ColorAnimation { duration: 140 } }
+                                }
+                            }
+
+                            // ── Arrow icon (→) ───────────────────────────────
+                            Text {
+                                anchors.centerIn: parent
+                                // Unicode right arrow — clean, weight-neutral across fonts
+                                text: "→"
+                                color: "white"
+                                opacity: loginButton.enabled ? 1.0 : 0.45
+                                Behavior on opacity { NumberAnimation { duration: 150 } }
+                                font {
+                                    family:    displayFont.name
+                                    pixelSize: Math.round(parent.height * 0.42)
+                                    weight:    Font.Medium
+                                }
+
+                                // Press-down micro scale for tactile feel
+                                scale: loginButton._pressed ? 0.82 : 1.0
+                                Behavior on scale {
+                                    NumberAnimation { duration: 95; easing.type: Easing.OutBack }
+                                }
+                            }
+
+                            // ── Interaction ───────────────────────────────────
+                            MouseArea {
+                                id:           loginMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape:  parent.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                onClicked: {
+                                    if (parent.enabled)
+                                        sddm.login(usernameInput.text,
+                                                   passwordInput.text,
+                                                   sessionCombo.index)
+                                }
+                            }
 
                             KeyNavigation.backtab: passwordInput
                             KeyNavigation.tab:     rebootButton
+
+                            activeFocusOnTab: true
+
+                            // Keyboard activation (Enter/Space on focused button)
+                            Keys.onPressed: function(event) {
+                                if (event.key === Qt.Key_Return ||
+                                    event.key === Qt.Key_Enter  ||
+                                    event.key === Qt.Key_Space) {
+                                    sddm.login(usernameInput.text,
+                                               passwordInput.text,
+                                               sessionCombo.index)
+                                    event.accepted = true
+                                }
+                            }
                         }
                     }
 
