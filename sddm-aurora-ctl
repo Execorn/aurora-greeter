@@ -202,6 +202,7 @@ def _reexec_with_sudo() -> None:
     _info("Re-launching with sudo — you may be prompted for your password.")
     print()
 
+    # Safe: execvp uses exec(), not a shell — no injection risk from argv.
     sudo_cmd = ["sudo", sys.executable] + sys.argv
     try:
         os.execvp("sudo", sudo_cmd)
@@ -679,6 +680,8 @@ def _playlist_order(args: argparse.Namespace) -> None:
 
     _ok(f"Order directive set: {directive}")
     _ok(f"Playlist updated: {playlist_path}")
+    if order.upper() == "SHUFFLED":
+        _info("Shuffle is applied at runtime by the QML engine when it reads the directive.")
     print()
 
 
@@ -1494,6 +1497,8 @@ def _build_parser() -> argparse.ArgumentParser:
             f"  sddm-aurora-ctl scheduler set-time --day-start 7 --day-end 20\n"
             f"  sddm-aurora-ctl config set-theme --accent '#89b4fa' --opacity 0.85\n"
             f"  sddm-aurora-ctl config set-theme --monitor-mode primary-only\n"
+            f"\n"
+            f"If not on PATH, invoke as: python3 /usr/share/sddm/themes/aurora-greeter/sddm-aurora-ctl\n"
         ),
     )
 

@@ -171,6 +171,7 @@ detect_gpus() {
     done
 
     # Deduplicate while preserving order (bash 4+)
+    [[ ${#gpus[@]} -eq 0 ]] && return
     local seen=()
     local gpu
     for gpu in "${gpus[@]:-}"; do
@@ -184,6 +185,9 @@ detect_gpus() {
 }
 
 detect_display_server() {
+    # Best-effort display server detection at install time.
+    # Run 'sddm-aurora-ctl hw-accel --status' after boot to verify.
+    #
     # Returns "wayland" or "x11" based on what sddm.service actually uses.
     # Priority: explicit QT_QPA env in sddm.service > WAYLAND_DISPLAY env >
     #           XDG_SESSION_TYPE > /etc/sddm.conf > x11 (safe default).
@@ -376,6 +380,14 @@ ${DROPIN_MARKER}
 #
 # Remove this file or run:  sudo ./install-hw-accel.sh --uninstall
 # Regenerate:               sudo ./install-hw-accel.sh --install
+#
+# ┌─────────────────────────────────────────────────────────────┐
+# │ NOTE: systemd Environment= vars are stripped by PAM before  │
+# │ reaching the SDDM greeter child process. Variables that     │
+# │ must reach the QML engine should ALSO be set via             │
+# │ GreeterEnvironment= in /etc/sddm.conf.d/*.conf              │
+# │ This drop-in only reliably affects the sddm daemon itself.  │
+# └─────────────────────────────────────────────────────────────┘
 
 [Service]
 

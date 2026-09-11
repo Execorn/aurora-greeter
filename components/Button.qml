@@ -35,6 +35,9 @@ Rectangle {
 
     // ── SddmComponents-compatible API ────────────────────────
     property string text:          ""
+    // Note: named 'font' (string) for API compatibility. Shadows the QML
+    // built-in font group property, but this is safe because Rectangle
+    // does not have a native font property. Consider renaming to fontFamily.
     property string font:          "sans-serif"
     property color  textColor:     "white"
     property color  activeColor:   "#268bd2"

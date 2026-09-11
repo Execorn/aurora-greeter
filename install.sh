@@ -50,8 +50,8 @@ readonly _MAGENTA='\033[0;35m'
 _banner() {
     echo -e ""
     echo -e "${_BOLD}${_CYAN}╔══════════════════════════════════════════════════════════════╗${_RESET}"
-    echo -e "${_BOLD}${_CYAN}║        Aurora Greeter  —  System Installer                    ║${_RESET}"
-    echo -e "${_BOLD}${_CYAN}║        Qt6 · Wayland · Nvidia · Arch Linux                   ║${_RESET}"
+    echo -e "${_BOLD}${_CYAN}║        Aurora Greeter  —  System Installer                   ║${_RESET}"
+    echo -e "${_BOLD}${_CYAN}║        Qt6 · Wayland · Nvidia · Arch Linux                  ║${_RESET}"
     echo -e "${_BOLD}${_CYAN}╚══════════════════════════════════════════════════════════════╝${_RESET}"
     echo -e ""
 }
@@ -166,9 +166,13 @@ rsync -a \
     --exclude='*.bak' \
     --exclude='*.bak_*' \
     --exclude='install.sh' \
+    --exclude='install-hw-accel.sh' \
+    --exclude='screenshot.sh' \
     --exclude='.vscode/' \
     --exclude='.idea/' \
     --exclude='__pycache__/' \
+    --exclude='backgrounds/' \
+    --exclude='playlists/*.m3u' \
     --delete \
     --info=progress2 \
     "${SCRIPT_DIR}/" \
@@ -307,7 +311,9 @@ cat > "${SDDM_CONF_FILE}" << 'EOF'
 Current=aurora-greeter
 
 [General]
-GreeterEnvironment=QML_XHR_ALLOW_FILE_READ=1,QML_XHR_ALLOW_FILE_WRITE=1,QT_MEDIA_BACKEND=gstreamer,GST_AUDIOSINK=fakesink,LIBVA_DRIVER_NAME=nvidia,NVD_BACKEND=direct,GBM_BACKEND=nvidia-drm,__GLX_VENDOR_LIBRARY_NAME=nvidia
+# Universal env vars only. For GPU-specific HW acceleration, run:
+#   sddm-aurora-ctl hw-accel install
+GreeterEnvironment=QML_XHR_ALLOW_FILE_READ=1,QT_MEDIA_BACKEND=gstreamer,GST_AUDIOSINK=fakesink
 EOF
 
 _ok "Theme + environment config written: ${SDDM_CONF_FILE}"

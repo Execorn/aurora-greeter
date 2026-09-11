@@ -61,7 +61,11 @@ Item {
         interval: 1000
         running:  true
         repeat:   true
-        onTriggered: root._now = new Date()
+        onTriggered: {
+            root._now = new Date()
+            // Self-align to second boundary to prevent drift
+            interval = 1000 - (Date.now() % 1000)
+        }
     }
 
     // ── Formatted strings ────────────────────────────────────────

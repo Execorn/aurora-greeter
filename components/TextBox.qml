@@ -25,6 +25,9 @@ FocusScope {
 
     // ── SddmComponents-compatible API ────────────────────────
     property alias  text:        inputField.text
+    // Note: named 'font' (string) for API compatibility. Shadows the QML
+    // built-in font group property, but this is safe because FocusScope
+    // does not have a native font property. Consider renaming to fontFamily.
     property string font:        "sans-serif"
     property color  color:       Qt.rgba(1, 1, 1, 0.08)
     property color  borderColor: "transparent"

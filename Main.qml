@@ -4,10 +4,10 @@
 //  License : CC-BY-SA-4.0 / MIT
 // ============================================================
 
-import QtQuick 2.15
-import QtQuick.Controls 2.15
-import QtMultimedia 6.0
-import SddmComponents 2.0
+import QtQuick
+import QtQuick.Controls
+import QtMultimedia
+import SddmComponents
 import Qt.labs.settings 1.0
 import "components"
 
@@ -51,6 +51,8 @@ Item {
         property string _configPath: _isSystemMode
             ? "file:///var/lib/sddm/.config/AuroraGreeter/settings.conf"
             : Qt.resolvedUrl("settings.conf").toString()
+        // Linux-only: strips file:// prefix leaving the leading / for absolute paths.
+        // On Linux, file:///path → /path (correct). Not portable to Windows.
         property string _configPathRaw: _configPath.replace(/^file:\/\//, "")
 
         // ── Live properties ───────────────────────────────────────────
@@ -88,6 +90,8 @@ Item {
 
         // Simple INI file parser
         function _parseIni(text) {
+            var numericKeys = ["loginCardOpacity", "slideshowInterval"]
+            var booleanKeys = ["useDayNightSchedule"]
             var lines = text.split("\n");
             var data = {};
             for (var i = 0; i < lines.length; i++) {
@@ -99,12 +103,14 @@ Item {
                 if (parts.length >= 2) {
                     var key = parts[0].trim();
                     var val = parts.slice(1).join("=").trim();
-                    if (val === "true") val = true;
-                    else if (val === "false") val = false;
-                    else if (!isNaN(val) && val !== "") {
+                    // Type coercion based on known key types
+                    if (booleanKeys.indexOf(key) !== -1) {
+                        val = (val.toLowerCase() === "true")
+                    } else if (numericKeys.indexOf(key) !== -1 && val !== "" && !isNaN(val)) {
                         if (val.indexOf(".") !== -1) val = parseFloat(val);
                         else val = parseInt(val, 10);
                     }
+                    // All other keys remain as strings (including colours, paths, etc.)
                     data[key] = val;
                 }
             }
@@ -119,19 +125,19 @@ Item {
             try {
                 xhr.send()
             } catch(e) {
-                // Try local fallback (dev/test-mode)
-                _configPath = _isSystemMode
-                    ? "file:///var/lib/sddm/.config/AuroraGreeter/settings.conf"
-                    : Qt.resolvedUrl("settings.conf").toString()
-                xhr.open("GET", _configPath, false)
-                try {
-                    xhr.send()
-                } catch(e2) {
-                    return
-                }
+                console.info("[AuroraGreeter] No settings file yet (first boot?) —",
+                             _configPath, "| Using defaults.")
+                return
             }
-            if (xhr.status !== 0 && xhr.status !== 200) return
-            if (!xhr.responseText || xhr.responseText.trim() === "") return
+            if (xhr.status !== 0 && xhr.status !== 200) {
+                console.info("[AuroraGreeter] Settings file not readable (status",
+                             xhr.status, ") — using defaults.")
+                return
+            }
+            if (!xhr.responseText || xhr.responseText.trim() === "") {
+                console.info("[AuroraGreeter] Settings file empty — using defaults.")
+                return
+            }
             try {
                 var data = _parseIni(xhr.responseText)
                 if (typeof data.activePlaylist         === "string") activePlaylist         = data.activePlaylist
@@ -153,6 +159,7 @@ Item {
                 }
 
                 _loaded = true
+                console.log("[AuroraGreeter] Settings loaded from:", _configPath)
             } catch(e) {
                 console.warn("[AuroraGreeter] Settings INI parse error:", e)
             }
@@ -428,6 +435,8 @@ Item {
 
         // No Behavior here: this layer must snap to full opacity instantly
         // after the crossfade swap so the front layer can re-hide behind it.
+        // Note: crossfade-out when this is the front (L648-652) is instant (no Behavior),
+        // while crossfade-out of fallbackImage is animated. This asymmetry is intentional.
     }
 
     // ── Layer 2: Static image / slideshow front / video fallback ─────────
@@ -733,7 +742,8 @@ Item {
         var isS     = (event.key === Qt.Key_S)
 
         if ((isAlt || isMeta) && isS) {
-            configDrawer.toggle()
+            if (root.isPrimary)
+                configDrawer.toggle()
             event.accepted = true   // consume — do NOT forward to text inputs
             return
         }
@@ -1265,6 +1275,7 @@ Item {
     ConfigDrawer {
         id: configDrawer
         z: 10
+        visible: root.isPrimary
         anchors {
             top:    parent.top
             left:   parent.left
@@ -1284,6 +1295,7 @@ Item {
 
     function _revealUI() {
         root.uiVisible = true
+        _focusAppropriateInput()
     }
 
     function _focusAppropriateInput() {
@@ -1371,10 +1383,8 @@ Item {
 
     function _loadM3u(resolvedUrl) {
         var xhr = new XMLHttpRequest()
-        xhr.open("GET", resolvedUrl, false /* synchronous */)
-        try {
-            xhr.send()
-        } catch (e) {
+        xhr.open("GET", resolvedUrl, false)
+        try { xhr.send() } catch (e) {
             console.warn("[AuroraGreeter] XHR exception loading playlist:", resolvedUrl, e)
             return []
         }
@@ -1383,15 +1393,18 @@ Item {
             console.warn("[AuroraGreeter] Playlist HTTP error (", xhr.status, "):", resolvedUrl)
             return []
         }
-        var entries = _parseM3u(xhr.responseText)
+        var rawText = xhr.responseText
+        var shouldShuffle = (rawText.indexOf("#EXT-ORDER: SHUFFLED") !== -1)
+        var entries = _parseM3u(rawText)
         if (entries.length === 0) {
             console.warn("[AuroraGreeter] Playlist parsed but contains no entries:", resolvedUrl)
             return []
         }
-        // [v4] Apply resolution cap before returning.  Must happen after
-        // parsing but before the caller uses the entries, so every code
-        // path that calls _loadM3u() gets capped URLs automatically.
         _applyResolutionCap(entries)
+        if (shouldShuffle) {
+            _shuffleArray(entries)
+            console.log("[AuroraGreeter] Playlist shuffled (", entries.length, "entries)")
+        }
         return entries
     }
 
@@ -1725,11 +1738,7 @@ Item {
     function _initPlayback(rawVideoPath, rawImagePath) {
         // Always set a fallback image source (used by video mode as a
         // last-resort fallback and by image mode as the primary source).
-        if (root.activeBackgroundType === "color") {
-            _activateImageFallback() // Fades out video, lets solid color render
-            return
-    	}
-	fallbackImage.source = Qt.resolvedUrl(rawImagePath)
+        fallbackImage.source = Qt.resolvedUrl(rawImagePath)
 
         if (!root.showBackground) return
 
@@ -1769,16 +1778,18 @@ Item {
             }
             root.playlistEntries = entries
             root.playlistIndex   = 0
+            root._videoReloading = true
             backgroundVideo.source = entries[0]
         } else {
             var single = [ resolvedVideo.toString() ]
             _applyResolutionCap(single)
             root.playlistEntries = single
             root.playlistIndex   = 0
+            root._videoReloading = true
             backgroundVideo.source = single[0]
         }
 
-        backgroundVideo.play()
+        Qt.callLater(function() { backgroundVideo.play() })
         console.log("[AuroraGreeter] Init → video mode:", rawVideoPath,
                     "| perf:", root.performanceMode,
                     "| effective:", root._isLowPerf ? "low (2K)" : "high")
@@ -1813,11 +1824,12 @@ Item {
 
     Timer {
         id:       settingsSyncTimer
-        interval: 400
+        interval: 1500
         repeat:   true
         running:  !isPrimary   // only non-primary screens need to poll
 
         onTriggered: {
+            if (!root._isReady) return
             var xhr = new XMLHttpRequest()
             xhr.open("GET", persist._configPath, false)
             try { xhr.send() } catch(e) {
@@ -1860,6 +1872,7 @@ Item {
             if (typeof data.loginCardOpacity       === "number")  persist.loginCardOpacity       = data.loginCardOpacity
             if (typeof data.backgroundColor        === "string")  persist.backgroundColor        = data.backgroundColor
             if (typeof data.slideshowInterval      === "number")  persist.slideshowInterval      = data.slideshowInterval
+            if (typeof data.clockFormat            === "string")  persist.clockFormat            = data.clockFormat
 
             // ── Restart the media pipeline for any media-relevant change ───
             if (bgChanged || plChanged || msChanged || pmChanged || schedChanged || colorChanged) {
@@ -1882,16 +1895,52 @@ Item {
 
 
     // ─────────────────────────────────────────────────────────────────────
+    //  DAY/NIGHT BOUNDARY TIMER
+    //
+    //  Re-evaluates the day/night schedule every 60 seconds on the
+    //  primary screen.  If the time period has changed (day→night or
+    //  night→day), reloads the backdrop with the correct media source.
+    // ─────────────────────────────────────────────────────────────────────
+    Timer {
+        id: scheduleBoundaryTimer
+        interval: 60000
+        repeat:   true
+        running:  root.isPrimary && root.useDayNightSchedule && root._isReady
+
+        property bool _lastIsDay: true
+
+        onTriggered: {
+            var hour = new Date().getHours()
+            var dayStart = parseInt(config.day_time_start)
+            var dayEnd   = parseInt(config.day_time_end)
+            var isDay = (!isNaN(dayStart) && !isNaN(dayEnd))
+                ? (dayStart <= dayEnd
+                    ? (hour >= dayStart && hour <= dayEnd)
+                    : (hour >= dayStart || hour <= dayEnd))
+                : true
+
+            if (isDay !== _lastIsDay) {
+                console.log("[AuroraGreeter] Day/night boundary crossed:",
+                            _lastIsDay ? "day→night" : "night→day")
+                _lastIsDay = isDay
+                _updateBackdropFromSettings()
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
     //  DAY/NIGHT SCHEDULER HELPERS
     // ─────────────────────────────────────────────────────────────────────
 
     // Resolves time-based background paths using system clock and theme.conf settings
     function _resolveScheduledMedia() {
-        var hour     = parseInt(new Date().toLocaleTimeString(Qt.locale(), 'h'))
+        var hour     = new Date().getHours()
         var dayStart = parseInt(config.day_time_start)
         var dayEnd   = parseInt(config.day_time_end)
         var isDay    = (!isNaN(dayStart) && !isNaN(dayEnd))
-                       ? (hour >= dayStart && hour <= dayEnd)
+                       ? (dayStart <= dayEnd
+                           ? (hour >= dayStart && hour <= dayEnd)
+                           : (hour >= dayStart || hour <= dayEnd))
                        : true
 
         var videoPath = isDay ? config.background_vid_day  : config.background_vid_night
@@ -1926,6 +1975,7 @@ Item {
         //  persist.activePlaylist, persist.activeBackgroundType, and
         //  persist.performanceMode all reflect any saved user choices.
         persist.load()
+        persist.sync()  // Populate settingsStore with loaded values
 
         // ── Source selection ───────────────────────────────────────────
         var videoPath, imagePath

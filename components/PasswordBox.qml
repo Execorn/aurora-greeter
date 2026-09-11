@@ -226,6 +226,13 @@ FocusScope {
             }
         }
 
+        // Reset echo mode to masked when focus leaves — prevents
+        // accidental plaintext exposure if a show/hide toggle was used.
+        onActiveFocusChanged: {
+            if (!activeFocus && echoMode !== TextInput.Password)
+                echoMode = TextInput.Password
+        }
+
         // Pass Tab / Backtab up for KeyNavigation handling
         Keys.onTabPressed:     function(event) { event.accepted = false }
         Keys.onBacktabPressed: function(event) { event.accepted = false }

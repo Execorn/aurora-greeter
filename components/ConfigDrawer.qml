@@ -99,7 +99,7 @@ Item {
     //  GEOMETRY
     // ─────────────────────────────────────────────────────────────
 
-    readonly property int _panelWidth: 340
+    readonly property int _panelWidth: Math.max(320, Math.min(480, Screen.width * 0.22))
     readonly property int _tabWidth:   36
     readonly property int _tabHeight:  52
 
@@ -167,7 +167,10 @@ Item {
         switch (_backdropType) {
             case "image":     return imageSourceModel
             case "slideshow": return imageSourceModel   // slideshow cycles through images
-            default:          return videoPlaylistModel  // "video"
+            default:
+                if (_backdropType !== "video")
+                    console.warn("[AuroraGreeter] Unknown backdrop type:", _backdropType, "— defaulting to video")
+                return videoPlaylistModel
         }
     }
 
@@ -179,6 +182,10 @@ Item {
     //  ConfigDrawer lives in components/ so index.json is at ../playlists/index.json
     //  relative to this file's location.
     // ────────────────────────────────────────────────────────────
+    // TODO [Audit 7.1]: All XMLHttpRequest calls in this file use synchronous mode
+    // (xhr.open("GET", url, false)) which blocks the QML render thread.
+    // Migrate to async XHR with onreadystatechange callbacks for better UX
+    // on systems with slow storage or large playlists.
     function _loadCatalogue() {
         var indexUrl = Qt.resolvedUrl("../playlists/index.json")
         var xhr = new XMLHttpRequest()
@@ -553,9 +560,15 @@ Item {
                                             // (theme root), not the components/ subdir.
                                             if (typeof root.reloadBackdrop === "function") {
                                                 var t = root.settings.activeBackgroundType
-                                                var s = (t === "video")
-                                                        ? root.settings.activePlaylist
-                                                        : root.settings.activeMediaSource
+                                                var s
+                                                if (t === "video") {
+                                                    s = root.settings.activePlaylist
+                                                } else if (t === "image" || t === "slideshow" || t === "color") {
+                                                    s = root.settings.activeMediaSource
+                                                } else {
+                                                    console.warn("[AuroraGreeter] Unknown backdrop type:", t, "— defaulting to video")
+                                                    s = root.settings.activePlaylist
+                                                }
                                                 root.reloadBackdrop(t, s)
                                             }
                                         }
@@ -800,7 +813,9 @@ Item {
                             case "image":     return "STATIC IMAGE"
                             case "slideshow": return "SLIDESHOW PLAYLIST"
                             case "color":     return "BACKGROUND COLOR"
-                            default:          return "SOURCE"
+                            default:
+                                console.warn("[AuroraGreeter] Unknown backdrop type:", root._backdropType, "— defaulting to video")
+                                return "SOURCE"
                         }
                     }
                 }
@@ -1030,8 +1045,11 @@ Item {
                                 root.settings.useDayNightSchedule = false
                                 if (type === "video") {
                                     root.settings.activePlaylist = model.path
-                                } else {
+                                } else if (type === "image" || type === "slideshow" || type === "color") {
                                     root.settings.activeMediaSource = model.path
+                                } else {
+                                    console.warn("[AuroraGreeter] Unknown backdrop type:", type, "— defaulting to video")
+                                    root.settings.activePlaylist = model.path
                                 }
                                 root.settings.sync()
 
@@ -1041,9 +1059,13 @@ Item {
                                 if (type === "video") {
                                     if (typeof root.reloadPlaylist === "function")
                                         root.reloadPlaylist(model.path)
-                                } else {
+                                } else if (type === "image" || type === "slideshow" || type === "color") {
                                     if (typeof root.reloadBackdrop === "function")
                                         root.reloadBackdrop(type, model.path)
+                                } else {
+                                    console.warn("[AuroraGreeter] Unknown backdrop type:", type, "— falling back to video reload")
+                                    if (typeof root.reloadPlaylist === "function")
+                                        root.reloadPlaylist(model.path)
                                 }
                             }
                         }
